@@ -1563,6 +1563,10 @@ pub struct VideoHandler {
     _display: usize, // useful for debug
     fail_counter: usize,
     first_frame: bool,
+    // Set after a mid-stream decode failure resets the decoder; frames are
+    // discarded until a key frame arrives, because the tail of the previous
+    // stream is undecodable on the fresh decoder.
+    discard_until_key_frame: bool,
 }
 
 impl VideoHandler {
@@ -1595,6 +1599,7 @@ impl VideoHandler {
             _display,
             fail_counter: 0,
             first_frame: true,
+            discard_until_key_frame: false,
         }
     }
 
@@ -1612,7 +1617,15 @@ impl VideoHandler {
         }
         match &vf.union {
             Some(frame) => {
-                let res = self.decoder.handle_video_frame(
+                if self.discard_until_key_frame {
+                    if !Self::union_has_key_frame(frame) {
+                        // Tail of the previous stream; undecodable on the
+                        // freshly reset decoder.
+                        return Ok(false);
+                    }
+                    self.discard_until_key_frame = false;
+                }
+                let mut res = self.decoder.handle_video_frame(
                     frame,
                     &mut self.rgb,
                     &mut self.texture,
@@ -1634,6 +1647,22 @@ impl VideoHandler {
                             self.fail_counter
                         );
                     }
+                    if self.fail_counter < MAX_DECODE_FAIL_COUNTER {
+                        // A mid-stream failure is typically the encoder
+                        // changing resolution, which a hardware decoder's
+                        // frame context cannot follow. Recreate the decoder,
+                        // discard frames until the next key frame, and return
+                        // an error so the caller requests a refresh. Keep the
+                        // fail counter so a decoder that also fails on fresh
+                        // key frames still gets marked unsupported.
+                        let fail_counter = self.fail_counter;
+                        self.reset(None);
+                        self.fail_counter = fail_counter;
+                        self.discard_until_key_frame = true;
+                        res = res.and(Err(anyhow!(
+                            "decode failed; decoder reset, waiting for a key frame"
+                        )));
+                    }
                 }
                 self.first_frame = false;
                 if self.record {
@@ -1649,6 +1678,16 @@ impl VideoHandler {
                 res
             }
             _ => Ok(false),
+        }
+    }
+
+    fn union_has_key_frame(frame: &video_frame::Union) -> bool {
+        use video_frame::Union::*;
+        match frame {
+            Vp8s(f) | Vp9s(f) | Av1s(f) | H264s(f) | H265s(f) => {
+                f.frames.iter().any(|e| e.key)
+            }
+            _ => false,
         }
     }
 
