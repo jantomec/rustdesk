@@ -1846,6 +1846,10 @@ impl<T: InvokeUiSession> Remote<T> {
                         self.handler.handle_peer_switch_display(&s);
                         if let Some(thread) = self.video_threads.get_mut(&(s.display as usize)) {
                             thread.video_sender.send(MediaData::Reset).ok();
+                            thread
+                                .video_sender
+                                .send(MediaData::DisplaySize((s.width, s.height)))
+                                .ok();
                         }
 
                         let mut scale = 1.0;
@@ -2084,6 +2088,19 @@ impl<T: InvokeUiSession> Remote<T> {
                 Some(message::Union::PeerInfo(pi)) => {
                     self.handler.set_displays(&pi.displays);
                     self.handler.set_platform_additions(&pi.platform_additions);
+                    // Forward the (possibly changed) display sizes to the
+                    // video threads so a decoder that cannot follow a
+                    // mid-stream resolution change gets replaced. Modern
+                    // hosts announce resolution changes with this re-sent
+                    // PeerInfo rather than Misc::SwitchDisplay.
+                    for (idx, d) in pi.displays.iter().enumerate() {
+                        if let Some(thread) = self.video_threads.get_mut(&idx) {
+                            thread
+                                .video_sender
+                                .send(MediaData::DisplaySize((d.width, d.height)))
+                                .ok();
+                        }
+                    }
                 }
                 Some(message::Union::ScreenshotResponse(response)) => {
                     crate::client::screenshot::set_screenshot(response.data);

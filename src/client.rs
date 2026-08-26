@@ -1567,6 +1567,12 @@ pub struct VideoHandler {
     // discarded until a key frame arrives, because the tail of the previous
     // stream is undecodable on the fresh decoder.
     discard_until_key_frame: bool,
+    // Consecutive successful decodes whose size differs from the peer's
+    // display size; see the stale-decoder guard in the video thread.
+    stale_size_counter: usize,
+    // Live display size from PeerInfo / SwitchDisplay updates (physical
+    // pixels). None until the first update arrives.
+    expected_size: Option<(i32, i32)>,
 }
 
 impl VideoHandler {
@@ -1600,6 +1606,8 @@ impl VideoHandler {
             fail_counter: 0,
             first_frame: true,
             discard_until_key_frame: false,
+            stale_size_counter: 0,
+            expected_size: None,
         }
     }
 
@@ -1623,6 +1631,10 @@ impl VideoHandler {
                         // freshly reset decoder.
                         return Ok(false);
                     }
+                    log::info!(
+                        "key frame after decoder reset, display {}",
+                        self._display
+                    );
                     self.discard_until_key_frame = false;
                 }
                 let mut res = self.decoder.handle_video_frame(
@@ -1679,6 +1691,13 @@ impl VideoHandler {
             }
             _ => Ok(false),
         }
+    }
+
+    /// Recreate the decoder after it kept emitting frames of a stale size,
+    /// then wait for a key frame (the caller requests a refresh).
+    pub fn reset_for_stale_size(&mut self) {
+        self.reset(None);
+        self.discard_until_key_frame = true;
     }
 
     fn union_has_key_frame(frame: &video_frame::Union) -> bool {
@@ -2896,6 +2915,11 @@ pub enum MediaData {
     AudioFrame(Box<AudioFrame>),
     AudioFormat(AudioFormat),
     Reset,
+    // The peer's display changed size (width, height in physical pixels).
+    // The decoder must be replaced: hardware decoders do not reliably follow
+    // mid-stream resolution changes (VideoToolbox either fails the frame
+    // transfer or silently keeps emitting old-size frames).
+    DisplaySize((i32, i32)),
     RecordScreen(bool),
 }
 
@@ -2974,6 +2998,43 @@ pub fn start_video_thread<F, T>(
                             let format_changed = handler.decoder.format() != format;
                             match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
                                 Ok(true) => {
+                                    // A hardware decoder can fail to follow a
+                                    // mid-stream resolution change and keep
+                                    // emitting frames of the old size without
+                                    // erroring (observed with VideoToolbox on
+                                    // H265). The renderer then draws garbage
+                                    // (buffer size no longer matches the
+                                    // display rect). Compare the decoded size
+                                    // with the peer's display size; a
+                                    // persistent mismatch means the decoder is
+                                    // stale: recreate it and ask for a key
+                                    // frame. The threshold rides out the
+                                    // legitimate window where new-size frames
+                                    // arrive before SwitchDisplay.
+                                    let expected = handler.expected_size;
+                                    let decoded = if pixelbuffer {
+                                        (handler.rgb.w as i32, handler.rgb.h as i32)
+                                    } else {
+                                        (handler.texture.w as i32, handler.texture.h as i32)
+                                    };
+                                    if let Some((ew, eh)) = expected {
+                                        if ew > 0 && eh > 0 && (decoded.0 != ew || decoded.1 != eh)
+                                        {
+                                            handler.stale_size_counter += 1;
+                                            if handler.stale_size_counter >= 30 {
+                                                log::warn!(
+                                                    "decoded size {}x{} != display {} size {}x{} for {} frames; resetting decoder",
+                                                    decoded.0, decoded.1, display, ew, eh,
+                                                    handler.stale_size_counter
+                                                );
+                                                handler.stale_size_counter = 0;
+                                                handler.reset_for_stale_size();
+                                                session.refresh_video(display as _);
+                                            }
+                                        } else {
+                                            handler.stale_size_counter = 0;
+                                        }
+                                    }
                                     video_callback(
                                         display,
                                         &mut handler.rgb,
@@ -3040,6 +3101,21 @@ pub fn start_video_thread<F, T>(
                     MediaData::Reset => {
                         if let Some(handler) = video_handler.as_mut() {
                             handler.reset(None);
+                        }
+                    }
+                    MediaData::DisplaySize((w, h)) => {
+                        if let Some(handler) = video_handler.as_mut() {
+                            let changed =
+                                handler.expected_size.map_or(false, |s| s != (w, h));
+                            handler.expected_size = Some((w, h));
+                            if changed {
+                                log::info!(
+                                    "display {} size changed to {}x{}; resetting decoder",
+                                    display, w, h
+                                );
+                                handler.reset_for_stale_size();
+                                session.refresh_video(display as _);
+                            }
                         }
                     }
                     MediaData::RecordScreen(start) => {
