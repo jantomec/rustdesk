@@ -141,7 +141,9 @@ class MainFlutterWindow: NSWindow {
         // key-ability via the dynamic subclass.
         makeKeyable(window)
         window.styleMask = [.borderless, .fullSizeContentView]
-        NSApp.presentationOptions = [.autoHideMenuBar, .autoHideDock]
+        // Fully hidden, not auto-hide: the menu bar must not reveal on
+        // mouse-to-top while a remote session owns the whole panel.
+        NSApp.presentationOptions = [.hideMenuBar, .hideDock]
         window.level = fullPanelLevel
         window.setFrame(screen.frame, display: true)
         window.makeKeyAndOrderFront(nil)

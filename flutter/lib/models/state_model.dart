@@ -77,6 +77,9 @@ class StateGlobal {
   setMinimized(bool v) => _isMinimized = v;
 
   setFullscreen(bool v, {bool procWnd = true}) {
+    // Leaving native fullscreen is part of the upgrade to full-panel mode;
+    // ignore the resulting leave event so the state stays "fullscreen".
+    if (_macOSFullPanelTransition && !v) return;
     if (_fullscreen.value != v) {
       _fullscreen.value = v;
       _showTabBar.value = !_fullscreen.value;
@@ -111,6 +114,7 @@ class StateGlobal {
   }
 
   bool _macOSFullPanelActive = false;
+  bool _macOSFullPanelTransition = false;
 
   Future<void> _procFullscreenWindow() async {
     final entering = _fullscreen.isTrue;
@@ -120,6 +124,30 @@ class StateGlobal {
       // game-style full-panel window instead; the runner declines on screens
       // without a notch and we fall through to native fullscreen.
       if (entering) {
+        // Fullscreen initiated natively (green traffic light, restored
+        // window state) lands here already in native fullscreen; leave it
+        // first so the full-panel window can take over on a notched screen.
+        try {
+          final wc = WindowController.fromWindowId(windowId);
+          if (await wc.isFullScreen()) {
+            final geom = await kMacOSPermChannel
+                .invokeMapMethod<dynamic, dynamic>('getMacOSScreenGeometry');
+            if (geom?['hasNotch'] != true) return; // native is fine there
+            _macOSFullPanelTransition = true;
+            try {
+              await wc.setFullscreen(false);
+              for (int i = 0; i < 30; i++) {
+                await Future.delayed(const Duration(milliseconds: 100));
+                if (!(await wc.isFullScreen())) break;
+              }
+              await Future.delayed(const Duration(milliseconds: 300));
+            } finally {
+              _macOSFullPanelTransition = false;
+            }
+          }
+        } catch (_) {
+          _macOSFullPanelTransition = false;
+        }
         bool usedFullPanel = false;
         try {
           usedFullPanel =
