@@ -1563,6 +1563,16 @@ pub struct VideoHandler {
     _display: usize, // useful for debug
     fail_counter: usize,
     first_frame: bool,
+    // Set after a mid-stream decode failure resets the decoder; frames are
+    // discarded until a key frame arrives, because the tail of the previous
+    // stream is undecodable on the fresh decoder.
+    discard_until_key_frame: bool,
+    // Consecutive successful decodes whose size differs from the peer's
+    // display size; see the stale-decoder guard in the video thread.
+    stale_size_counter: usize,
+    // Live display size from PeerInfo / SwitchDisplay updates (physical
+    // pixels). None until the first update arrives.
+    expected_size: Option<(i32, i32)>,
 }
 
 impl VideoHandler {
@@ -1595,6 +1605,9 @@ impl VideoHandler {
             _display,
             fail_counter: 0,
             first_frame: true,
+            discard_until_key_frame: false,
+            stale_size_counter: 0,
+            expected_size: None,
         }
     }
 
@@ -1612,7 +1625,19 @@ impl VideoHandler {
         }
         match &vf.union {
             Some(frame) => {
-                let res = self.decoder.handle_video_frame(
+                if self.discard_until_key_frame {
+                    if !Self::union_has_key_frame(frame) {
+                        // Tail of the previous stream; undecodable on the
+                        // freshly reset decoder.
+                        return Ok(false);
+                    }
+                    log::info!(
+                        "key frame after decoder reset, display {}",
+                        self._display
+                    );
+                    self.discard_until_key_frame = false;
+                }
+                let mut res = self.decoder.handle_video_frame(
                     frame,
                     &mut self.rgb,
                     &mut self.texture,
@@ -1634,6 +1659,22 @@ impl VideoHandler {
                             self.fail_counter
                         );
                     }
+                    if self.fail_counter < MAX_DECODE_FAIL_COUNTER {
+                        // A mid-stream failure is typically the encoder
+                        // changing resolution, which a hardware decoder's
+                        // frame context cannot follow. Recreate the decoder,
+                        // discard frames until the next key frame, and return
+                        // an error so the caller requests a refresh. Keep the
+                        // fail counter so a decoder that also fails on fresh
+                        // key frames still gets marked unsupported.
+                        let fail_counter = self.fail_counter;
+                        self.reset(None);
+                        self.fail_counter = fail_counter;
+                        self.discard_until_key_frame = true;
+                        res = res.and(Err(anyhow!(
+                            "decode failed; decoder reset, waiting for a key frame"
+                        )));
+                    }
                 }
                 self.first_frame = false;
                 if self.record {
@@ -1649,6 +1690,23 @@ impl VideoHandler {
                 res
             }
             _ => Ok(false),
+        }
+    }
+
+    /// Recreate the decoder after it kept emitting frames of a stale size,
+    /// then wait for a key frame (the caller requests a refresh).
+    pub fn reset_for_stale_size(&mut self) {
+        self.reset(None);
+        self.discard_until_key_frame = true;
+    }
+
+    fn union_has_key_frame(frame: &video_frame::Union) -> bool {
+        use video_frame::Union::*;
+        match frame {
+            Vp8s(f) | Vp9s(f) | Av1s(f) | H264s(f) | H265s(f) => {
+                f.frames.iter().any(|e| e.key)
+            }
+            _ => false,
         }
     }
 
@@ -2857,6 +2915,11 @@ pub enum MediaData {
     AudioFrame(Box<AudioFrame>),
     AudioFormat(AudioFormat),
     Reset,
+    // The peer's display changed size (width, height in physical pixels).
+    // The decoder must be replaced: hardware decoders do not reliably follow
+    // mid-stream resolution changes (VideoToolbox either fails the frame
+    // transfer or silently keeps emitting old-size frames).
+    DisplaySize((i32, i32)),
     RecordScreen(bool),
 }
 
@@ -2935,6 +2998,43 @@ pub fn start_video_thread<F, T>(
                             let format_changed = handler.decoder.format() != format;
                             match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
                                 Ok(true) => {
+                                    // A hardware decoder can fail to follow a
+                                    // mid-stream resolution change and keep
+                                    // emitting frames of the old size without
+                                    // erroring (observed with VideoToolbox on
+                                    // H265). The renderer then draws garbage
+                                    // (buffer size no longer matches the
+                                    // display rect). Compare the decoded size
+                                    // with the peer's display size; a
+                                    // persistent mismatch means the decoder is
+                                    // stale: recreate it and ask for a key
+                                    // frame. The threshold rides out the
+                                    // legitimate window where new-size frames
+                                    // arrive before SwitchDisplay.
+                                    let expected = handler.expected_size;
+                                    let decoded = if pixelbuffer {
+                                        (handler.rgb.w as i32, handler.rgb.h as i32)
+                                    } else {
+                                        (handler.texture.w as i32, handler.texture.h as i32)
+                                    };
+                                    if let Some((ew, eh)) = expected {
+                                        if ew > 0 && eh > 0 && (decoded.0 != ew || decoded.1 != eh)
+                                        {
+                                            handler.stale_size_counter += 1;
+                                            if handler.stale_size_counter >= 30 {
+                                                log::warn!(
+                                                    "decoded size {}x{} != display {} size {}x{} for {} frames; resetting decoder",
+                                                    decoded.0, decoded.1, display, ew, eh,
+                                                    handler.stale_size_counter
+                                                );
+                                                handler.stale_size_counter = 0;
+                                                handler.reset_for_stale_size();
+                                                session.refresh_video(display as _);
+                                            }
+                                        } else {
+                                            handler.stale_size_counter = 0;
+                                        }
+                                    }
                                     video_callback(
                                         display,
                                         &mut handler.rgb,
@@ -3001,6 +3101,21 @@ pub fn start_video_thread<F, T>(
                     MediaData::Reset => {
                         if let Some(handler) = video_handler.as_mut() {
                             handler.reset(None);
+                        }
+                    }
+                    MediaData::DisplaySize((w, h)) => {
+                        if let Some(handler) = video_handler.as_mut() {
+                            let changed =
+                                handler.expected_size.map_or(false, |s| s != (w, h));
+                            handler.expected_size = Some((w, h));
+                            if changed {
+                                log::info!(
+                                    "display {} size changed to {}x{}; resetting decoder",
+                                    display, w, h
+                                );
+                                handler.reset_for_stale_size();
+                                session.refresh_video(display as _);
+                            }
                         }
                     }
                     MediaData::RecordScreen(start) => {
