@@ -106,12 +106,41 @@ class StateGlobal {
     print("fullscreen: $fullscreen, resizeEdgeSize: ${_resizeEdgeSize.value}");
     _windowBorderWidth.value = fullscreen.isTrue ? 0 : kWindowBorderWidth;
     if (procWnd) {
-      final wc = WindowController.fromWindowId(windowId);
-      wc.setFullscreen(_fullscreen.isTrue).then((_) {
-        // We remove the redraw (width + 1, height + 1), because this issue cannot be reproduced.
-        // https://github.com/rustdesk/rustdesk/issues/9675
-      });
+      _procFullscreenWindow();
     }
+  }
+
+  bool _macOSFullPanelActive = false;
+
+  Future<void> _procFullscreenWindow() async {
+    final entering = _fullscreen.isTrue;
+    if (isMacOS) {
+      // On a notched panel, native fullscreen never extends under the camera
+      // housing (AppKit clamps the window to the safe area), so use a
+      // game-style full-panel window instead; the runner declines on screens
+      // without a notch and we fall through to native fullscreen.
+      if (entering) {
+        bool usedFullPanel = false;
+        try {
+          usedFullPanel =
+              await kMacOSPermChannel.invokeMethod('enterMacOSFullPanel') ==
+                  true;
+        } catch (_) {}
+        _macOSFullPanelActive = usedFullPanel;
+        if (usedFullPanel) return;
+      } else if (_macOSFullPanelActive) {
+        _macOSFullPanelActive = false;
+        try {
+          await kMacOSPermChannel.invokeMethod('exitMacOSFullPanel');
+        } catch (_) {}
+        return;
+      }
+    }
+    final wc = WindowController.fromWindowId(windowId);
+    wc.setFullscreen(entering).then((_) {
+      // We remove the redraw (width + 1, height + 1), because this issue cannot be reproduced.
+      // https://github.com/rustdesk/rustdesk/issues/9675
+    });
   }
 
   refreshResizeEdgeSize() => _resizeEdgeSize.value = fullscreen.isTrue
