@@ -4466,8 +4466,38 @@ impl Connection {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn change_resolution(&mut self, d: Option<usize>, r: &Resolution) {
         if self.keyboard {
+            let display_idx = d.unwrap_or(self.display_idx);
+            // On the Linux DRM build the display list the client sees is
+            // `drm_capturer::get_display_infos()` (DRM connectors followed by niri virtual
+            // outputs); scrap's `Display::all()` below is the PipeWire capturable list and
+            // does not contain the virtual outputs, so resolve those here first.
+            #[cfg(all(target_os = "linux", feature = "drm"))]
+            if let Some(infos) = super::drm_capturer::get_display_infos() {
+                if let Some(info) = infos.get(display_idx) {
+                    if crate::platform::niri_ipc::find_virtual(&info.name).is_some() {
+                        display_service::set_last_changed_resolution(
+                            &info.name,
+                            (info.width, info.height),
+                            (r.width, r.height),
+                        );
+                        if let Err(e) = crate::platform::change_resolution(
+                            &info.name,
+                            r.width as _,
+                            r.height as _,
+                        ) {
+                            log::error!(
+                                "Failed to change resolution of niri virtual output '{}' to ({},{}): {:?}",
+                                info.name,
+                                r.width,
+                                r.height,
+                                e
+                            );
+                        }
+                        return;
+                    }
+                }
+            }
             if let Ok(displays) = display_service::try_get_displays() {
-                let display_idx = d.unwrap_or(self.display_idx);
                 if let Some(display) = displays.get(display_idx) {
                     let name = display.name();
                     #[cfg(windows)]
