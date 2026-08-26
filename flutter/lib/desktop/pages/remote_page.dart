@@ -579,6 +579,10 @@ class _RemotePageState extends State<RemotePage>
     super.onWindowMove();
     // Update pointer lock center when window is moved
     _updatePointerLockCenterIfNeeded();
+    // A move can land on another monitor and change devicePixelRatio without
+    // any resize; updateViewStyle re-checks geometry (cheap no-op otherwise)
+    // and feeds the auto-fit debounce.
+    _ffi.canvasModel.updateViewStyle();
   }
 
   /// Update pointer lock center with debouncing to avoid excessive updates
