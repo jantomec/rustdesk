@@ -19,6 +19,8 @@ pub mod delegate;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "linux")]
+pub mod niri_ipc;
 
 #[cfg(target_os = "linux")]
 pub mod gtk_sudo;

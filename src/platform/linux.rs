@@ -1843,6 +1843,9 @@ fn get_xrandr_conn_pat(name: &str) -> String {
 }
 
 pub fn resolutions(name: &str) -> Vec<Resolution> {
+    if let Some(list) = super::niri_ipc::resolutions_for(name) {
+        return list;
+    }
     let resolutions_pat = r"(?P<resolutions>(\s*\d+x\d+\s+\d+.*\n)+)";
     let connected_pat = get_xrandr_conn_pat(name);
     let mut v = vec![];
@@ -1905,6 +1908,9 @@ pub fn resolutions(name: &str) -> Vec<Resolution> {
 }
 
 pub fn current_resolution(name: &str) -> ResultType<Resolution> {
+    if let Some(res) = super::niri_ipc::current_resolution_for(name) {
+        return Ok(res);
+    }
     let xrandr_output = run_cmds("xrandr --query | tr -s ' '")?;
     let re = Regex::new(&get_xrandr_conn_pat(name))?;
     if let Some(caps) = re.captures(&xrandr_output) {
@@ -1920,6 +1926,9 @@ pub fn current_resolution(name: &str) -> ResultType<Resolution> {
 }
 
 pub fn change_resolution_directly(name: &str, width: usize, height: usize) -> ResultType<()> {
+    if super::niri_ipc::find_virtual(name).is_some() {
+        return super::niri_ipc::set_custom_mode(name, width as u16, height as u16, None);
+    }
     Command::new("xrandr")
         .args(vec![
             "--output",

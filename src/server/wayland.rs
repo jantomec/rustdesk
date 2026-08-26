@@ -447,6 +447,11 @@ pub(super) fn get_capturer_for_display(
     if is_x11() {
         bail!("Do not call this function if not wayland");
     }
+    // niri virtual outputs have no DRM connector; they are captured through wlr-screencopy.
+    #[cfg(feature = "drm")]
+    if let Some(info) = super::niri_virtual_display::capturer_info(display_idx) {
+        return info;
+    }
     // DRM/KMS capture path: build the capturer straight from the service `_drm` stream, bypassing
     // the PipeWire CAP_DISPLAY_INFO machinery entirely. `is_available()` is a GLOBAL verdict, so a
     // per-display DRM failure (an ungrabbable/demoted CRTC, or — after the phase-2 split — a

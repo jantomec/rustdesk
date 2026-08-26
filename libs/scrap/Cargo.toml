@@ -10,7 +10,7 @@ authors = ["Ram <quadrupleslap@gmail.com>"]
 edition = "2018"
 
 [features]
-wayland = ["gstreamer", "gstreamer-app", "gstreamer-video", "dbus", "tracing", "zbus"]
+wayland = ["gstreamer", "gstreamer-app", "gstreamer-video", "dbus", "tracing", "zbus", "sctk"]
 # `drm` is a pure runtime-dlopen backend: rustdesk loads `libdrmtap.so.0` at runtime (`drmtap_dl.rs`)
 # and NEVER link-time links it, so the graceful PipeWire fallback when the .so or EGL is absent is
 # preserved and the drm build pulls in no libdrm/seccomp/cap/EGL link-time deps. The .so is pinned by
@@ -68,6 +68,9 @@ gstreamer = { version = "0.16", optional = true }
 gstreamer-app = { version = "0.16", features = ["v1_10"], optional = true }
 gstreamer-video = { version = "0.16", optional = true }
 zbus = { version = "3.15", optional = true }
+# wlr-screencopy capturer (wayland/screencopy.rs); same crate/version hbb_common already uses.
+sctk = { package = "smithay-client-toolkit", version = "0.20.0", default-features = false, optional = true }
+libc = "0.2"
 
 [dependencies.hwcodec]
 git = "https://github.com/rustdesk-org/hwcodec"

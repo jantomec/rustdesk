@@ -1218,6 +1218,7 @@ pub(super) fn get_display_infos_and_primary() -> Option<(Vec<DisplayInfo>, usize
     mark_demoted_displays(&list, &mut infos);
     // Primary and geometry must use the same connector assignment snapshot.
     let primary = primary_index_from_assignment(&assignment, wl.primary);
+    super::niri_virtual_display::append(&mut infos);
     Some((infos, primary))
 }
 
@@ -1228,6 +1229,7 @@ pub(super) fn get_display_infos() -> Option<Vec<DisplayInfo>> {
     };
     let mut infos = augment_with_wayland_geometry(&list);
     mark_demoted_displays(&list, &mut infos);
+    super::niri_virtual_display::append(&mut infos);
     Some(infos)
 }
 
