@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:async';
-import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -479,10 +478,6 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   // Kept in sync after settings-triggered rebuilds.
   final _multiEdgeEnabled = false.obs;
   final _dockingOptionsInitialized = false.obs;
-  // macOS notched-panel fullscreen: screen geometry from the runner, used to
-  // park a top-docked toolbar beside the camera housing instead of under it.
-  final _macScreenGeometry = Rxn<Map<dynamic, dynamic>>();
-  Worker? _macFullscreenGeometryWorker;
   bool _pendingDockingOptionSync = false;
   int _dockingOptionSyncSerial = 0;
   int _dragEpoch = 0;
@@ -663,87 +658,6 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
         _isCursorOverImage = false;
       }
     });
-
-    if (isMacOS) {
-      _macFullscreenGeometryWorker = ever(stateGlobal.fullscreen, (_) {
-        _refreshMacScreenGeometry();
-      });
-      _refreshMacScreenGeometry();
-    }
-  }
-
-  Future<void> _refreshMacScreenGeometry() async {
-    if (!isMacOS) return;
-    if (stateGlobal.fullscreen.isFalse) {
-      _macScreenGeometry.value = null;
-      return;
-    }
-    // Let the fullscreen transition (and any full-panel reframe) settle.
-    await Future.delayed(const Duration(milliseconds: 600));
-    if (!mounted || stateGlobal.fullscreen.isFalse) return;
-    try {
-      _macScreenGeometry.value = await kMacOSPermChannel
-          .invokeMapMethod<dynamic, dynamic>('getMacOSScreenGeometry');
-    } catch (_) {
-      _macScreenGeometry.value = null;
-    }
-  }
-
-  // On a notched MacBook in fullscreen, once the window really covers the
-  // whole panel, top-center is the camera housing. Park a top-docked toolbar
-  // inside the auxiliary area beside the notch (right of it for
-  // fraction >= 0.5, left otherwise), scaled down to the strip's height when
-  // needed. Everywhere else: the regular edge alignment.
-  Widget _positionToolbar(Widget child, _ToolbarEdge edge) {
-    defaultPos() => Align(
-          alignment: _alignmentForEdge(edge, _fraction.value),
-          child: child,
-        );
-    if (!isMacOS ||
-        edge != _ToolbarEdge.top ||
-        stateGlobal.fullscreen.isFalse) {
-      return defaultPos();
-    }
-    final geom = _macScreenGeometry.value;
-    if (geom == null || geom['hasNotch'] != true) return defaultPos();
-    final frame = geom['frame'];
-    final windowFrame = geom['windowFrame'];
-    // Only when the content actually extends under the notch; otherwise the
-    // auxiliary areas lie outside this window.
-    if (frame is! Map || windowFrame is! Map) return defaultPos();
-    if (frame['w'] != windowFrame['w'] || frame['h'] != windowFrame['h']) {
-      return defaultPos();
-    }
-    final aux = _fraction.value >= 0.5
-        ? (geom['auxiliaryTopRightArea'] ?? geom['auxiliaryTopLeftArea'])
-        : (geom['auxiliaryTopLeftArea'] ?? geom['auxiliaryTopRightArea']);
-    if (aux is! Map) return defaultPos();
-    final auxX = (aux['x'] as num).toDouble();
-    final auxW = (aux['w'] as num).toDouble();
-    final auxH = (aux['h'] as num).toDouble();
-    final measured = _toolbarSizeForEdge(edge, _toolbarSize.value);
-    final scale = measured.height > auxH ? auxH / measured.height : 1.0;
-    final span = auxW - measured.width * scale;
-    // Reuse the user's drag fraction to slide within the auxiliary strip.
-    final local = (_fraction.value >= 0.5
-            ? (_fraction.value - 0.5) * 2
-            : _fraction.value * 2)
-        .clamp(0.0, 1.0);
-    final left = auxX + (span > 0 ? span * local : 0);
-    return Positioned(
-      left: left,
-      top: 0,
-      child: scale < 1.0
-          ? SizedBox(
-              height: auxH,
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                alignment: Alignment.topLeft,
-                child: child,
-              ),
-            )
-          : child,
-    );
   }
 
   @override
@@ -763,7 +677,6 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   @override
   dispose() {
     ++_dockingOptionSyncSerial;
-    _macFullscreenGeometryWorker?.dispose();
     widget.onEnterOrLeaveImageCleaner(identityHashCode(this));
     super.dispose();
   }
@@ -794,14 +707,14 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
         }
       });
 
-      final toolbar = _positionToolbar(
-        KeyedSubtree(
+      final toolbar = Align(
+        alignment: _alignmentForEdge(edge, _fraction.value),
+        child: KeyedSubtree(
           key: _toolbarKey,
           child: collapse.isFalse
               ? _buildToolbar(context, edge, isHorizontal)
               : _buildDraggableCollapse(context, edge, isHorizontal),
         ),
-        edge,
       );
 
       // Always return the Stack — even when not dragging — so the toolbar's
@@ -938,7 +851,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     }
     if (!isWeb) toolbarItems.add(_RecordMenu());
     toolbarItems.add(_CloseMenu(id: widget.id, ffi: widget.ffi));
-    final toolbarBorderRadius = BorderRadius.all(Radius.circular(14.0));
+    final toolbarBorderRadius = BorderRadius.all(Radius.circular(4.0));
     // innerAxis: how the toolbar icons themselves flow.
     // outerAxis: how the toolbar block and the handle stack against each other
     // (perpendicular to the dock edge, so the handle hangs off the interior face).
@@ -947,50 +860,31 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     final spacer = isHorizontal
         ? SizedBox(width: _ToolbarTheme.buttonHMargin * 2)
         : SizedBox(height: _ToolbarTheme.buttonHMargin * 2);
-    // Frosted pill: blurred translucent surface with a hairline border
-    // instead of the hard 1px outline.
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final toolbarBackground = Theme.of(context)
-        .menuBarTheme
-        .style
-        ?.backgroundColor
-        ?.resolve(MaterialState.values.toSet());
     final toolbarMaterial = Material(
       elevation: _ToolbarTheme.elevation,
       shadowColor: MyTheme.color(context).shadow,
       borderRadius: toolbarBorderRadius,
-      clipBehavior: Clip.antiAlias,
-      color: Colors.transparent,
-      child: ClipRRect(
-        borderRadius: toolbarBorderRadius,
-        child: BackdropFilter(
-          filter: ui.ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-          child: Container(
-            decoration: BoxDecoration(
-              color: toolbarBackground?.withOpacity(0.72),
-              borderRadius: toolbarBorderRadius,
-              border: Border.all(
-                color: isDark
-                    ? Colors.white.withOpacity(0.10)
-                    : Colors.black.withOpacity(0.07),
+      color: Theme.of(context)
+          .menuBarTheme
+          .style
+          ?.backgroundColor
+          ?.resolve(MaterialState.values.toSet()),
+      child: SingleChildScrollView(
+        scrollDirection: innerAxis,
+        child: Theme(
+          data: themeData(),
+          child: _ToolbarTheme.borderWrapper(
+              context,
+              Flex(
+                direction: innerAxis,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  spacer,
+                  ...toolbarItems,
+                  spacer,
+                ],
               ),
-            ),
-            child: SingleChildScrollView(
-              scrollDirection: innerAxis,
-              child: Theme(
-                data: themeData(),
-                child: Flex(
-                  direction: innerAxis,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    spacer,
-                    ...toolbarItems,
-                    spacer,
-                  ],
-                ),
-              ),
-            ),
-          ),
+              toolbarBorderRadius),
         ),
       ),
     );
@@ -1836,11 +1730,11 @@ class _DisplayMenuState extends State<_DisplayMenu> {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     menuChildrenGetter(_IconSubmenuButtonState state) {
-      // With auto-fit active, the resolution/scale/view-style/codec pickers
-      // are redundant day to day; keep them reachable under "Advanced".
-      final autoFitActive =
-          ffi.connType == ConnType.defaultConn && ffi.autoFitModel.active;
-      final advanced = <Widget>[
+      final menuChildren = <Widget>[
+        if (ffi.connType == ConnType.defaultConn &&
+            ffiModel.isVirtualDisplayResolution)
+          autoFitToggle(),
+        _screenAdjustor.adjustWindow(context),
         viewStyle(customPercent: _customPercent),
         scrollStyle(state, colorScheme),
         imageQuality(),
@@ -1850,19 +1744,6 @@ class _DisplayMenuState extends State<_DisplayMenu> {
             id: widget.id,
             ffi: widget.ffi,
             screenAdjustor: _screenAdjustor,
-          ),
-      ];
-      final menuChildren = <Widget>[
-        if (ffi.connType == ConnType.defaultConn &&
-            ffiModel.isVirtualDisplayResolution)
-          autoFitToggle(),
-        _screenAdjustor.adjustWindow(context),
-        if (!autoFitActive) ...advanced,
-        if (autoFitActive)
-          _SubmenuButton(
-            ffi: widget.ffi,
-            menuChildren: advanced,
-            child: Text(translate("Advanced")),
           ),
         if (showVirtualDisplayMenu(ffi) && ffi.connType == ConnType.defaultConn)
           _SubmenuButton(

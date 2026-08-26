@@ -642,10 +642,6 @@ class _RemotePageState extends State<RemotePage>
   void onWindowLeaveFullScreen() {
     super.onWindowLeaveFullScreen();
     if (isMacOS) {
-      // This event reports NATIVE fullscreen ending. While the window owns
-      // the full panel (or is upgrading to it), the native exit is part of
-      // that transition and must not tear the fullscreen state down.
-      if (stateGlobal.macOSFullPanelActive) return;
       stateGlobal.setFullscreen(false);
       _queueMacOSKeyboardAfterFullScreen();
     }

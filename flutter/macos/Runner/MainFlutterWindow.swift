@@ -53,168 +53,12 @@ class MainFlutterWindow: NSWindow {
             NSValue(size: screen.visibleFrame.size),
             forKey: window
         )
-        logFullscreenGeometry(tag: "willEnterFullScreen", window: window, screen: screen)
-    }
-
-    private static let fullscreenDidEnterObserver = NotificationCenter.default.addObserver(
-        forName: NSWindow.didEnterFullScreenNotification,
-        object: nil,
-        queue: .main
-    ) { notification in
-        guard let window = notification.object as? NSWindow,
-              let screen = window.screen else {
-            return
-        }
-        logFullscreenGeometry(tag: "didEnterFullScreen", window: window, screen: screen)
-    }
-
-    /// True when the screen has a camera housing that reserves part of the panel.
-    private static func hasNotch(_ screen: NSScreen) -> Bool {
-        if #available(macOS 12.0, *) {
-            return screen.safeAreaInsets.top > 0
-        }
-        return false
-    }
-
-    // Game-style full-panel mode for notched screens. Native fullscreen
-    // Spaces never extend under the camera housing (AppKit clamps the window
-    // to the safe area after the transition), so instead the window keeps its
-    // titled style (it must stay able to become key), is framed over the
-    // whole screen programmatically, and floats above the auto-hidden menu
-    // bar while the app is active.
-    private class FullPanelState {
-        let frame: NSRect
-        let level: NSWindow.Level
-        let styleMask: NSWindow.StyleMask
-        let presentationOptions: NSApplication.PresentationOptions
-        init(window: NSWindow) {
-            frame = window.frame
-            level = window.level
-            styleMask = window.styleMask
-            presentationOptions = NSApp.presentationOptions
-        }
-    }
-
-    private static let fullPanelStates = NSMapTable<NSWindow, FullPanelState>(
-        keyOptions: [.weakMemory, .objectPointerPersonality],
-        valueOptions: .strongMemory
-    )
-
-    private static let fullPanelLevel =
-        NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 1)
-
-    private static var keyablePatchedClasses = Set<String>()
-
-    /// Add canBecomeKey / canBecomeMain overrides returning true to the
-    /// window's own class, so a borderless window keeps keyboard focus.
-    /// The class itself is patched (never the instance's isa, which would
-    /// corrupt AppKit's KVO bookkeeping), skipping any NSKVONotifying_ shim.
-    /// All windows of that class are custom-chrome Flutter windows that want
-    /// key-ability in every style, so the class-wide effect is intended.
-    private static func makeKeyable(_ window: NSWindow) {
-        var cls: AnyClass = object_getClass(window)!
-        while NSStringFromClass(cls).hasPrefix("NSKVONotifying_"),
-              let sup = class_getSuperclass(cls) {
-            cls = sup
-        }
-        let name = NSStringFromClass(cls)
-        guard !keyablePatchedClasses.contains(name) else { return }
-        keyablePatchedClasses.insert(name)
-        let returnTrue = imp_implementationWithBlock(
-            { (_: NSWindow) -> Bool in true } as @convention(block) (NSWindow) -> Bool)
-        for sel in [#selector(getter: NSWindow.canBecomeKey),
-                    #selector(getter: NSWindow.canBecomeMain)] {
-            if let m = class_getInstanceMethod(cls, sel) {
-                // Only adds an override on this class; if that fails the
-                // class already defines its own - leave it alone.
-                class_addMethod(cls, sel, returnTrue, method_getTypeEncoding(m))
-            }
-        }
-    }
-
-    static func enterFullPanel(window: NSWindow, screen: NSScreen) -> Bool {
-        if fullPanelStates.object(forKey: window) != nil { return true }
-        let state = FullPanelState(window: window)
-        fullPanelStates.setObject(state, forKey: window)
-        // A titled window can never cover the camera-housing strip (AppKit
-        // clamps every setFrame), so go borderless the way games do, keeping
-        // key-ability via the dynamic subclass.
-        makeKeyable(window)
-        window.styleMask = [.borderless, .fullSizeContentView]
-        // Fully hidden, not auto-hide: the menu bar must not reveal on
-        // mouse-to-top while a remote session owns the whole panel.
-        NSApp.presentationOptions = [.hideMenuBar, .hideDock]
-        window.level = fullPanelLevel
-        window.setFrame(screen.frame, display: true)
-        window.makeKeyAndOrderFront(nil)
-        NSLog("[RustDesk] fullPanel(enter): window=%@ screen=%@",
-              NSStringFromRect(window.frame), NSStringFromRect(screen.frame))
-        if window.frame == screen.frame {
-            return true
-        }
-        // Still clamped; roll back and let the caller use native fullscreen.
-        exitFullPanel(window: window)
-        return false
-    }
-
-    static func exitFullPanel(window: NSWindow) {
-        guard let state = fullPanelStates.object(forKey: window) else { return }
-        fullPanelStates.removeObject(forKey: window)
-        window.styleMask = state.styleMask
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        NSApp.presentationOptions = state.presentationOptions
-        window.level = state.level
-        window.setFrame(state.frame, display: true)
-        window.makeKeyAndOrderFront(nil)
-        NSLog("[RustDesk] fullPanel(exit): window=%@", NSStringFromRect(window.frame))
-    }
-
-    // While another app is active, the full-panel window must not float over
-    // it; drop to the normal level and float again when the app comes back.
-    private static let fullPanelAppActivityObservers: [NSObjectProtocol] = [
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.didResignActiveNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            forEachFullPanelWindow { $0.level = .normal }
-        },
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.didBecomeActiveNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            forEachFullPanelWindow { $0.level = fullPanelLevel }
-        },
-    ]
-
-    private static func forEachFullPanelWindow(_ body: (NSWindow) -> Void) {
-        for case let window as NSWindow in fullPanelStates.keyEnumerator() {
-            body(window)
-        }
-    }
-
-    private static func logFullscreenGeometry(tag: String, window: NSWindow, screen: NSScreen) {
-        NSLog("[RustDesk] %@: window.frame=%@ screen.frame=%@ visibleFrame=%@ scale=%.1f",
-              tag,
-              NSStringFromRect(window.frame),
-              NSStringFromRect(screen.frame),
-              NSStringFromRect(screen.visibleFrame),
-              Double(screen.backingScaleFactor))
-        if #available(macOS 12.0, *) {
-            let i = screen.safeAreaInsets
-            NSLog("[RustDesk] %@: safeAreaInsets=(t=%.1f,l=%.1f,b=%.1f,r=%.1f) auxTopLeft=%@ auxTopRight=%@ contentSafeAreaRect=%@ contentLayoutRect=%@",
-                  tag, Double(i.top), Double(i.left), Double(i.bottom), Double(i.right),
-                  screen.auxiliaryTopLeftArea.map(NSStringFromRect) ?? "nil",
-                  screen.auxiliaryTopRightArea.map(NSStringFromRect) ?? "nil",
-                  window.contentView.map { NSStringFromRect($0.safeAreaRect) } ?? "nil",
-                  NSStringFromRect(window.contentLayoutRect))
-        }
     }
 
     /// Screen geometry for the Dart side, in top-left-origin points relative
-    /// to the window's screen. Extends the getMacOSWorkAreaSize pattern.
+    /// to the window's screen. Extends the getMacOSWorkAreaSize pattern; the
+    /// auto-fit feature uses backingScaleFactor to validate Flutter's
+    /// devicePixelRatio during window transitions.
     private static func screenGeometryDict(window: NSWindow, screen: NSScreen) -> [String: Any] {
         func rectDict(_ r: NSRect) -> [String: Double] {
             // AppKit screen coords have a bottom-left origin; convert to
@@ -254,8 +98,6 @@ class MainFlutterWindow: NSWindow {
     override func awakeFromNib() {
         rustdesk_core_main();
         _ = MainFlutterWindow.fullscreenObserver
-        _ = MainFlutterWindow.fullscreenDidEnterObserver
-        _ = MainFlutterWindow.fullPanelAppActivityObservers
         let flutterViewController = FlutterViewController.init()
         let windowFrame = self.frame
         self.contentViewController = flutterViewController
@@ -494,26 +336,6 @@ class MainFlutterWindow: NSWindow {
 
                 case "disableNativeRelativeMouseMode":
                     self.disableNativeRelativeMouseMode()
-                    result(true)
-
-                case "enterMacOSFullPanel":
-                    guard Thread.isMainThread,
-                          let window = registrar.view?.window,
-                          let screen = window.screen ?? NSScreen.main,
-                          MainFlutterWindow.hasNotch(screen),
-                          !window.styleMask.contains(.fullScreen) else {
-                        result(false)
-                        break
-                    }
-                    result(MainFlutterWindow.enterFullPanel(window: window, screen: screen))
-
-                case "exitMacOSFullPanel":
-                    guard Thread.isMainThread,
-                          let window = registrar.view?.window else {
-                        result(false)
-                        break
-                    }
-                    MainFlutterWindow.exitFullPanel(window: window)
                     result(true)
 
                 case "getMacOSScreenGeometry":
