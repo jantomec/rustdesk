@@ -116,6 +116,12 @@ class StateGlobal {
   bool _macOSFullPanelActive = false;
   bool _macOSFullPanelTransition = false;
 
+  /// True while a remote window owns the whole notched panel (game-style
+  /// borderless fullscreen) or is upgrading to it. The native
+  /// enter/leave-fullscreen window events do not apply to that mode.
+  bool get macOSFullPanelActive =>
+      _macOSFullPanelActive || _macOSFullPanelTransition;
+
   Future<void> _procFullscreenWindow() async {
     final entering = _fullscreen.isTrue;
     if (isMacOS) {
@@ -124,37 +130,39 @@ class StateGlobal {
       // game-style full-panel window instead; the runner declines on screens
       // without a notch and we fall through to native fullscreen.
       if (entering) {
-        // Fullscreen initiated natively (green traffic light, restored
-        // window state) lands here already in native fullscreen; leave it
-        // first so the full-panel window can take over on a notched screen.
+        // The guard spans the whole upgrade: leaving native fullscreen emits
+        // a leave event whose timing is unpredictable (it has been observed
+        // both during and well after the exit animation), and it must not
+        // tear the fullscreen state down mid-upgrade.
+        _macOSFullPanelTransition = true;
+        bool usedFullPanel = false;
         try {
-          final wc = WindowController.fromWindowId(windowId);
-          if (await wc.isFullScreen()) {
-            final geom = await kMacOSPermChannel
-                .invokeMapMethod<dynamic, dynamic>('getMacOSScreenGeometry');
-            if (geom?['hasNotch'] != true) return; // native is fine there
-            _macOSFullPanelTransition = true;
-            try {
+          // Fullscreen initiated natively (green traffic light, restored
+          // window state) lands here already in native fullscreen; leave it
+          // first so the full-panel window can take over on a notched screen.
+          try {
+            final wc = WindowController.fromWindowId(windowId);
+            if (await wc.isFullScreen()) {
+              final geom = await kMacOSPermChannel
+                  .invokeMapMethod<dynamic, dynamic>('getMacOSScreenGeometry');
+              if (geom?['hasNotch'] != true) return; // native is fine there
               await wc.setFullscreen(false);
               for (int i = 0; i < 30; i++) {
                 await Future.delayed(const Duration(milliseconds: 100));
                 if (!(await wc.isFullScreen())) break;
               }
               await Future.delayed(const Duration(milliseconds: 300));
-            } finally {
-              _macOSFullPanelTransition = false;
             }
-          }
-        } catch (_) {
+          } catch (_) {}
+          try {
+            usedFullPanel =
+                await kMacOSPermChannel.invokeMethod('enterMacOSFullPanel') ==
+                    true;
+          } catch (_) {}
+          _macOSFullPanelActive = usedFullPanel;
+        } finally {
           _macOSFullPanelTransition = false;
         }
-        bool usedFullPanel = false;
-        try {
-          usedFullPanel =
-              await kMacOSPermChannel.invokeMethod('enterMacOSFullPanel') ==
-                  true;
-        } catch (_) {}
-        _macOSFullPanelActive = usedFullPanel;
         if (usedFullPanel) return;
       } else if (_macOSFullPanelActive) {
         _macOSFullPanelActive = false;

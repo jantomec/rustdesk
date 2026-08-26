@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:async';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -937,7 +938,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     }
     if (!isWeb) toolbarItems.add(_RecordMenu());
     toolbarItems.add(_CloseMenu(id: widget.id, ffi: widget.ffi));
-    final toolbarBorderRadius = BorderRadius.all(Radius.circular(10.0));
+    final toolbarBorderRadius = BorderRadius.all(Radius.circular(14.0));
     // innerAxis: how the toolbar icons themselves flow.
     // outerAxis: how the toolbar block and the handle stack against each other
     // (perpendicular to the dock edge, so the handle hangs off the interior face).
@@ -946,33 +947,50 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     final spacer = isHorizontal
         ? SizedBox(width: _ToolbarTheme.buttonHMargin * 2)
         : SizedBox(height: _ToolbarTheme.buttonHMargin * 2);
+    // Frosted pill: blurred translucent surface with a hairline border
+    // instead of the hard 1px outline.
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final toolbarBackground = Theme.of(context)
+        .menuBarTheme
+        .style
+        ?.backgroundColor
+        ?.resolve(MaterialState.values.toSet());
     final toolbarMaterial = Material(
       elevation: _ToolbarTheme.elevation,
       shadowColor: MyTheme.color(context).shadow,
       borderRadius: toolbarBorderRadius,
       clipBehavior: Clip.antiAlias,
-      color: Theme.of(context)
-          .menuBarTheme
-          .style
-          ?.backgroundColor
-          ?.resolve(MaterialState.values.toSet())
-          ?.withOpacity(0.94),
-      child: SingleChildScrollView(
-        scrollDirection: innerAxis,
-        child: Theme(
-          data: themeData(),
-          child: _ToolbarTheme.borderWrapper(
-              context,
-              Flex(
-                direction: innerAxis,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  spacer,
-                  ...toolbarItems,
-                  spacer,
-                ],
+      color: Colors.transparent,
+      child: ClipRRect(
+        borderRadius: toolbarBorderRadius,
+        child: BackdropFilter(
+          filter: ui.ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+          child: Container(
+            decoration: BoxDecoration(
+              color: toolbarBackground?.withOpacity(0.72),
+              borderRadius: toolbarBorderRadius,
+              border: Border.all(
+                color: isDark
+                    ? Colors.white.withOpacity(0.10)
+                    : Colors.black.withOpacity(0.07),
               ),
-              toolbarBorderRadius),
+            ),
+            child: SingleChildScrollView(
+              scrollDirection: innerAxis,
+              child: Theme(
+                data: themeData(),
+                child: Flex(
+                  direction: innerAxis,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    spacer,
+                    ...toolbarItems,
+                    spacer,
+                  ],
+                ),
+              ),
+            ),
+          ),
         ),
       ),
     );
