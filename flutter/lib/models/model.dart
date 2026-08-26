@@ -13,6 +13,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter_hbb/common/widgets/peers_view.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/ab_model.dart';
+import 'package:flutter_hbb/models/auto_fit_model.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/cm_file_model.dart';
 import 'package:flutter_hbb/models/file_model.dart';
@@ -1415,6 +1416,22 @@ class FfiModel with ChangeNotifier {
                   (last >= 0 && last < _pi.displays.length)))
           ? last
           : null;
+      // With auto-fit on, land on the compositor-owned virtual display
+      // directly so the user doesn't have to pick it in the monitor menu.
+      // Reuses the monitor-restore path applied after the first image.
+      await parent.target?.autoFitModel.loadEnabled();
+      if (!isCache &&
+          pendingMonitorRestore == null &&
+          (parent.target?.autoFitModel.enabled ?? false) &&
+          bind.sessionGetUseAllMyDisplaysForTheRemoteSession(
+                  sessionId: sessionId) !=
+              'Y') {
+        final vIdx =
+            newDisplays.indexWhere((d) => d.isVirtualDisplayResolution);
+        if (vIdx >= 0 && vIdx != _pi.currentDisplay) {
+          pendingMonitorRestore = vIdx;
+        }
+      }
       // Fallback if the first image event never reaches this tab (multi-UI).
       _pendingRestoreTimer?.cancel();
       if (pendingMonitorRestore != null) {
@@ -2348,12 +2365,21 @@ class CanvasModel with ChangeNotifier {
   updateSize() => _size = getSize();
 
   updateViewStyle({refreshMousePos = true, notify = true}) async {
-    final style = await bind.sessionGetViewStyle(sessionId: sessionId);
+    var style = await bind.sessionGetViewStyle(sessionId: sessionId);
     if (style == null) {
       return;
     }
+    final autoFit = parent.target?.autoFitModel;
+    if (autoFit?.active ?? false) {
+      // Auto-fit keeps the virtual display equal to the viewport; render 1:1
+      // without touching the user's stored view-style choice.
+      style = kRemoteViewStyleOriginal;
+    }
 
     updateSize();
+    // Every viewport change (window resize, fullscreen transitions, monitor
+    // moves via onWindowMove, SwitchDisplay) funnels through here.
+    autoFit?.onViewportMayHaveChanged();
     final displayWidth = getDisplayWidth();
     final displayHeight = getDisplayHeight();
     final viewStyle = ViewStyle(
@@ -3703,6 +3729,7 @@ class FFI {
   late final ElevationModel elevationModel; // session
   late final CmFileModel cmFileModel; // cm
   late final TextureModel textureModel; //session
+  late final AutoFitModel autoFitModel; // session
   late final Peers recentPeersModel; // global
   late final Peers favoritePeersModel; // global
   late final Peers lanPeersModel; // global
@@ -3732,6 +3759,7 @@ class FFI {
     elevationModel = ElevationModel(WeakReference(this));
     cmFileModel = CmFileModel(WeakReference(this));
     textureModel = TextureModel(WeakReference(this));
+    autoFitModel = AutoFitModel(WeakReference(this));
     recentPeersModel = Peers(
         name: PeersModelName.recent,
         loadEvent: LoadEvent.recent,
@@ -4017,6 +4045,7 @@ class FFI {
   /// Close the remote session.
   Future<void> close({bool closeSession = true}) async {
     closed = true;
+    autoFitModel.dispose();
     if (isWeb) {
       platformFFI.clearVideoFrameCallback();
     }

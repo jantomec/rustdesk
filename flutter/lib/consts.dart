@@ -144,6 +144,9 @@ const String kOptionTouchMode = "touch-mode";
 const String kOptionI444 = "i444";
 const String kOptionSwapLeftRightMouse = "swap-left-right-mouse";
 const String kOptionCodecPreference = "codec-preference";
+// Per-peer (Flutter option): keep a virtual display sized to this client's
+// viewport automatically. Default on; only an explicit 'N' disables it.
+const String kOptionAutoFitVirtualDisplay = "auto-fit-virtual-display";
 const String kOptionRemoteMenubarDragLeft = "remote-menubar-drag-left";
 const String kOptionRemoteMenubarDragRight = "remote-menubar-drag-right";
 const String kOptionRemoteMenubarEdge = "remote-menubar-edge";

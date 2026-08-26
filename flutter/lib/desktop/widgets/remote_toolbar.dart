@@ -1731,6 +1731,9 @@ class _DisplayMenuState extends State<_DisplayMenu> {
     final colorScheme = Theme.of(context).colorScheme;
     menuChildrenGetter(_IconSubmenuButtonState state) {
       final menuChildren = <Widget>[
+        if (ffi.connType == ConnType.defaultConn &&
+            ffiModel.isVirtualDisplayResolution)
+          autoFitToggle(),
         _screenAdjustor.adjustWindow(context),
         viewStyle(customPercent: _customPercent),
         scrollStyle(state, colorScheme),
@@ -1791,6 +1794,20 @@ class _DisplayMenuState extends State<_DisplayMenu> {
       color: _ToolbarTheme.blueColor,
       hoverColor: _ToolbarTheme.hoverBlueColor,
       menuChildrenGetter: menuChildrenGetter,
+    );
+  }
+
+  autoFitToggle() {
+    return CkbMenuButton(
+      value: ffi.autoFitModel.enabled,
+      onChanged: (value) async {
+        if (value == null) return;
+        await ffi.autoFitModel.setEnabled(value);
+        await ffi.canvasModel.updateViewStyle();
+        if (mounted) setState(() {});
+      },
+      child: Text(translate("Auto size to window")),
+      ffi: ffi,
     );
   }
 

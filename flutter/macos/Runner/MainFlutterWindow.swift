@@ -55,6 +55,46 @@ class MainFlutterWindow: NSWindow {
         )
     }
 
+    /// Screen geometry for the Dart side, in top-left-origin points relative
+    /// to the window's screen. Extends the getMacOSWorkAreaSize pattern; the
+    /// auto-fit feature uses backingScaleFactor to validate Flutter's
+    /// devicePixelRatio during window transitions.
+    private static func screenGeometryDict(window: NSWindow, screen: NSScreen) -> [String: Any] {
+        func rectDict(_ r: NSRect) -> [String: Double] {
+            // AppKit screen coords have a bottom-left origin; convert to
+            // top-left-origin coords relative to this screen's frame.
+            return [
+                "x": Double(r.minX - screen.frame.minX),
+                "y": Double(screen.frame.maxY - r.maxY),
+                "w": Double(r.width),
+                "h": Double(r.height),
+            ]
+        }
+        var dict: [String: Any] = [
+            "frame": rectDict(screen.frame),
+            "visibleFrame": rectDict(screen.visibleFrame),
+            "windowFrame": rectDict(window.frame),
+            "backingScaleFactor": Double(screen.backingScaleFactor),
+            "hasNotch": false,
+        ]
+        if #available(macOS 12.0, *) {
+            dict["hasNotch"] = screen.safeAreaInsets.top > 0
+            dict["safeAreaInsets"] = [
+                "top": Double(screen.safeAreaInsets.top),
+                "left": Double(screen.safeAreaInsets.left),
+                "bottom": Double(screen.safeAreaInsets.bottom),
+                "right": Double(screen.safeAreaInsets.right),
+            ]
+            if let aux = screen.auxiliaryTopLeftArea {
+                dict["auxiliaryTopLeftArea"] = rectDict(aux)
+            }
+            if let aux = screen.auxiliaryTopRightArea {
+                dict["auxiliaryTopRightArea"] = rectDict(aux)
+            }
+        }
+        return dict
+    }
+
     override func awakeFromNib() {
         rustdesk_core_main();
         _ = MainFlutterWindow.fullscreenObserver
@@ -297,6 +337,15 @@ class MainFlutterWindow: NSWindow {
                 case "disableNativeRelativeMouseMode":
                     self.disableNativeRelativeMouseMode()
                     result(true)
+
+                case "getMacOSScreenGeometry":
+                    guard Thread.isMainThread,
+                          let window = registrar.view?.window,
+                          let screen = window.screen ?? NSScreen.main else {
+                        result(nil)
+                        break
+                    }
+                    result(MainFlutterWindow.screenGeometryDict(window: window, screen: screen))
 
                 case "getMacOSWorkAreaSize":
                     guard Thread.isMainThread,
