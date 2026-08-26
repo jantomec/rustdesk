@@ -585,6 +585,15 @@ class _RemotePageState extends State<RemotePage>
     _ffi.canvasModel.updateViewStyle();
   }
 
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    // devicePixelRatio can change with no resize or move event (the window
+    // reattaching to its screen after a fullscreen/styleMask transition);
+    // re-run the geometry check so auto-fit corrects a stale reading.
+    _ffi.canvasModel.updateViewStyle();
+  }
+
   /// Update pointer lock center with debouncing to avoid excessive updates
   /// during rapid window move/resize events.
   void _updatePointerLockCenterIfNeeded() {

@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
+import '../common.dart';
 import '../consts.dart';
 import 'model.dart';
 import 'platform_model.dart';
@@ -134,11 +135,32 @@ class AutoFitModel {
       onViewportMayHaveChanged();
       return;
     }
+    // A window that is mid-transition (styleMask changes, Space moves) can be
+    // briefly detached from its screen, making Flutter report a stale
+    // devicePixelRatio (1.0). Sending logical pixels would halve the remote
+    // resolution, so hold off while Flutter's ratio disagrees with the
+    // native screen's, and retry once things settle.
+    if (isMacOS) {
+      try {
+        final geom = await kMacOSPermChannel
+            .invokeMapMethod<dynamic, dynamic>('getMacOSScreenGeometry');
+        final native = (geom?['backingScaleFactor'] as num?)?.toDouble();
+        final dpr = ui.window.devicePixelRatio;
+        if (native != null && (native - dpr).abs() > 0.1) {
+          debugPrint('AutoFit: devicePixelRatio $dpr != native scale $native; '
+              'retrying after transition');
+          _debounceTimer?.cancel();
+          _debounceTimer = Timer(_debounce, () => onViewportMayHaveChanged());
+          return;
+        }
+      } catch (_) {}
+      if (ffi.closed || !active) return;
+    }
     _lastSent = target;
     _lastSentAt = DateTime.now();
     debugPrint(
         'AutoFit: requesting ${target.width.toInt()}x${target.height.toInt()} '
-        'for display $display');
+        'for display $display (dpr ${ui.window.devicePixelRatio})');
     await bind.sessionChangeResolution(
       sessionId: ffi.sessionId,
       display: display,
