@@ -1,10 +1,16 @@
 //! `wlr-screencopy` capturer for compositor-owned outputs that have no DRM scanout.
 //!
-//! niri's virtual outputs are rendered on demand for screencopy clients, so every
-//! [`TraitCapturer::frame`] call issues one `capture_output` request: the compositor
-//! renders the output with its GPU renderer, copies it into our `wl_shm` buffer and
-//! signals `ready`. There is no PipeWire, portal or DMA-BUF negotiation involved,
-//! which is what makes this path work on NVIDIA where the PipeWire route did not.
+//! niri's virtual outputs are rendered on demand for screencopy clients: on a
+//! `capture_output` request the compositor renders the output with its GPU renderer,
+//! copies it into our `wl_shm` buffer and signals `ready`. There is no PipeWire,
+//! portal or DMA-BUF negotiation involved, which is what makes this path work on
+//! NVIDIA where the PipeWire route did not.
+//!
+//! Capture is pipelined: [`TraitCapturer::frame`] returns the frame whose copy the
+//! previous call pre-requested and immediately pre-requests the next one into a
+//! second buffer, so the compositor renders and copies frame N+1 while the caller
+//! converts and encodes frame N. At 5K the request-to-ready time is ~9 ms, which a
+//! serial request would add to every encode cycle.
 
 use std::io;
 use std::os::fd::AsRawFd;
@@ -127,8 +133,17 @@ pub struct ScreencopyCapturer {
     manager: ZwlrScreencopyManagerV1,
     output: WlOutput,
     name: String,
-    pool: SlotPool,
-    buffer: Option<(Buffer, (u32, u32, u32, wl_shm::Format))>,
+    /// One single-buffer pool per slot: niri validates a screencopy shm buffer by
+    /// requiring the whole pool length to equal exactly one frame (stride x height),
+    /// so the two buffers cannot share a pool.
+    pools: [SlotPool; 2],
+    /// Two buffers, used alternately: while the caller holds one frame's pixels, the
+    /// pre-requested next copy lands in the other buffer.
+    buffers: [Option<(Buffer, (u32, u32, u32, wl_shm::Format))>; 2],
+    /// The pre-requested capture, if one is pending: its frame proxy and the index of
+    /// the buffer its copy writes into.
+    in_flight: Option<(ZwlrScreencopyFrameV1, usize)>,
+    next_idx: usize,
     /// Geometry this capturer was built for; a mismatch means the output was resized and
     /// the video service must rebuild with the new size.
     session_size: (u32, u32),
@@ -179,7 +194,11 @@ impl ScreencopyCapturer {
             })
             .ok_or_else(|| other(format!("no wl_output named {output_name:?}")))?;
 
-        let pool = SlotPool::new((width * height * 4).max(4096), &state.shm).map_err(other)?;
+        let pool_len = (width * height * 4).max(4096);
+        let pools = [
+            SlotPool::new(pool_len, &state.shm).map_err(other)?,
+            SlotPool::new(pool_len, &state.shm).map_err(other)?,
+        ];
         Ok(Self {
             _conn: conn,
             queue,
@@ -188,12 +207,63 @@ impl ScreencopyCapturer {
             manager,
             output,
             name: output_name.to_owned(),
-            pool,
-            buffer: None,
+            pools,
+            buffers: [None, None],
+            in_flight: None,
+            next_idx: 0,
             session_size: (width as u32, height as u32),
             overlay_cursor: overlay_cursor as i32,
             flipped: Vec::new(),
         })
+    }
+
+    /// Issue a capture request into the next buffer: wait for the buffer params,
+    /// reject a resized output, (re)create the target buffer if needed and send
+    /// `copy`. The compositor then renders and fills the buffer asynchronously;
+    /// completion is picked up by a later wait on `is_done`.
+    fn start_capture(&mut self, deadline: Instant) -> io::Result<()> {
+        self.state.pending = Pending::default();
+        let frame = self
+            .manager
+            .capture_output(self.overlay_cursor, &self.output, &self.qh, ());
+        if let Err(e) = self.wait_until(deadline, has_params) {
+            frame.destroy();
+            return Err(e);
+        }
+        let params = self.state.pending.params.expect("params present");
+        let (width, height, stride, format) = params;
+
+        // A resized output advertises its new size here, before any copy. Reject it now
+        // (destroying the frame) so the video service rebuilds at the new geometry; copying
+        // into a stale-sized buffer would draw a wlr protocol error and kill the connection.
+        if (width, height) != self.session_size {
+            frame.destroy();
+            return Err(other(format!(
+                "screencopy: output {} changed geometry ({}x{} -> {}x{}); rebuilding",
+                self.name, self.session_size.0, self.session_size.1, width, height
+            )));
+        }
+
+        let idx = self.next_idx;
+        if self.buffers[idx].as_ref().map(|(_, p)| *p) != Some(params) {
+            let (buffer, _) = self.pools[idx]
+                .create_buffer(width as i32, height as i32, stride as i32, format)
+                .map_err(other)?;
+            self.buffers[idx] = Some((buffer, params));
+        }
+        let (buffer, _) = self.buffers[idx].as_ref().expect("buffer present");
+        frame.copy(buffer.wl_buffer());
+        // Flush now: the whole point of the pre-request is that the compositor
+        // renders during the caller's convert+encode window, and without a flush
+        // the copy request would sit in the client send buffer until the next
+        // dispatch.
+        if let Err(e) = self.queue.flush() {
+            frame.destroy();
+            return Err(other(e));
+        }
+        self.in_flight = Some((frame, idx));
+        self.next_idx = 1 - idx;
+        Ok(())
     }
 
     /// Dispatch events until `ready(&state)` or the deadline passes (`WouldBlock`).
@@ -251,44 +321,41 @@ fn is_done(s: &State) -> bool {
 impl TraitCapturer for ScreencopyCapturer {
     fn frame<'a>(&'a mut self, timeout: Duration) -> io::Result<Frame<'a>> {
         let deadline = Instant::now() + timeout;
-        self.state.pending = Pending::default();
-        let frame = self
-            .manager
-            .capture_output(self.overlay_cursor, &self.output, &self.qh, ());
 
-        if let Err(e) = self.wait_until(deadline, has_params) {
-            frame.destroy();
+        // First call (or recovery after an aborted request): capture serially.
+        if self.in_flight.is_none() {
+            self.start_capture(deadline)?;
+        }
+
+        // Wait for the pending copy. A timeout leaves it pending so the next call
+        // resumes the same wait (WouldBlock is the video loop's idle path); any
+        // other failure aborts it so the next call starts clean.
+        if let Err(e) = self.wait_until(deadline, is_done) {
+            if e.kind() != io::ErrorKind::WouldBlock {
+                if let Some((frame, _)) = self.in_flight.take() {
+                    frame.destroy();
+                }
+            }
             return Err(e);
         }
-        let params = self.state.pending.params.expect("params present");
-        let (width, height, stride, format) = params;
-
-        // A resized output advertises its new size here, before any copy. Reject it now
-        // (destroying the frame) so the video service rebuilds at the new geometry; copying
-        // into a stale-sized buffer would draw a wlr protocol error and kill the connection.
-        if (width, height) != self.session_size {
-            frame.destroy();
-            return Err(other(format!(
-                "screencopy: output {} changed geometry ({}x{} -> {}x{}); rebuilding",
-                self.name, self.session_size.0, self.session_size.1, width, height
-            )));
-        }
-
-        if self.buffer.as_ref().map(|(_, p)| *p) != Some(params) {
-            let (buffer, _) = self
-                .pool
-                .create_buffer(width as i32, height as i32, stride as i32, format)
-                .map_err(other)?;
-            self.buffer = Some((buffer, params));
-        }
-        let (buffer, _) = self.buffer.as_ref().expect("buffer present");
-        frame.copy(buffer.wl_buffer());
-
-        let waited = self.wait_until(deadline, is_done);
+        let (frame, idx) = self.in_flight.take().expect("in-flight present");
         frame.destroy();
-        waited?;
-        if let Some(Err(msg)) = self.state.pending.done.take() {
+        let done = self.state.pending.done.take();
+        let y_invert = self.state.pending.y_invert;
+        if let Some(Err(msg)) = done {
             return Err(other(format!("screencopy of {}: {msg}", self.name)));
+        }
+        let (_, (width, height, stride, format)) =
+            self.buffers[idx].as_ref().expect("buffer present");
+        let (width, height, stride, format) = (*width, *height, *stride, *format);
+
+        // Pre-request the next frame into the other buffer. A geometry change must
+        // surface so the video service rebuilds at the new size; any other failure
+        // just degrades the next call to a serial capture.
+        match self.start_capture(deadline) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e),
         }
 
         let pixfmt = match format {
@@ -296,10 +363,8 @@ impl TraitCapturer for ScreencopyCapturer {
             wl_shm::Format::Xbgr8888 | wl_shm::Format::Abgr8888 => Pixfmt::RGBA,
             f => return Err(other(format!("unsupported screencopy shm format {f:?}"))),
         };
-        let y_invert = self.state.pending.y_invert;
-        let (buffer, _) = self.buffer.as_ref().expect("buffer present");
-        let canvas = self
-            .pool
+        let (buffer, _) = self.buffers[idx].as_ref().expect("buffer present");
+        let canvas = self.pools[idx]
             .canvas(buffer)
             .ok_or_else(|| other("screencopy buffer is not mapped"))?;
         let len = (stride * height) as usize;
