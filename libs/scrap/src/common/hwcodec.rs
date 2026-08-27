@@ -69,6 +69,15 @@ impl EncoderApi for HwRamEncoder {
                     Self::bitrate(&config.name, config.width, config.height, config.quality);
                 bitrate = Self::check_bitrate_range(&config, bitrate);
                 let gop = config.keyframe_interval.unwrap_or(DEFAULT_GOP as _) as i32;
+                // Quality_Default leaves NVENC on ffmpeg's default preset (p4),
+                // which caps at ~39 fps for 5K hevc on a GA106; Quality_Low maps
+                // to preset p1 (measured 85 fps there) and at desktop-sharing
+                // bitrates the visual difference is negligible.
+                let quality = if config.name.contains("nvenc") {
+                    Quality_Low
+                } else {
+                    DEFAULT_HW_QUALITY
+                };
                 let ctx = EncodeContext {
                     name: config.name.clone(),
                     mc_name: config.mc_name.clone(),
@@ -79,7 +88,7 @@ impl EncoderApi for HwRamEncoder {
                     kbs: bitrate as i32,
                     fps: DEFAULT_FPS,
                     gop,
-                    quality: DEFAULT_HW_QUALITY,
+                    quality,
                     rc,
                     q: -1,
                     thread_count: codec_thread_num(16) as _, // ffmpeg's thread_count is used for cpu
