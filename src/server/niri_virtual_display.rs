@@ -217,20 +217,42 @@ fn acquire_blocking(epoch: u64) {
         .filter(|o| !o.is_virtual() && o.mode.is_some())
         .map(|o| o.name.clone())
         .collect();
-    if candidates.is_empty() {
+    // A takeover orphaned by a crash may still be pending restore (its outputs
+    // are off, so they are not candidates); adopt its names so this guard's
+    // release restores them even if a fast reconnect beats the orphan thread.
+    let mut adopted: Vec<String> = std::fs::read_to_string(sentinel_path())
+        .ok()
+        .and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok())
+        .and_then(|v| {
+            Some(
+                v.get("outputs")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|s| s.as_str().map(str::to_owned))
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
+    adopted.retain(|n| !candidates.contains(n));
+    if !adopted.is_empty() {
+        log::info!("niri takeover: adopting orphaned outputs {adopted:?}");
+    }
+    if candidates.is_empty() && adopted.is_empty() {
         *guard = Some(SessionTakeover { disabled: Vec::new() });
         return;
     }
     // Sentinel first: a crash between here and the restore must leave enough
     // state behind for the orphan/ExecStopPost recovery. Turning an already-on
     // output on is harmless, so over-listing is fine.
+    let mut all_names = candidates.clone();
+    all_names.extend(adopted.iter().cloned());
     if let Err(e) = std::fs::write(
         sentinel_path(),
-        serde_json::json!({ "outputs": candidates }).to_string(),
+        serde_json::json!({ "outputs": all_names }).to_string(),
     ) {
         log::warn!("niri takeover: failed to write sentinel: {e}");
     }
-    let mut disabled = Vec::new();
+    let mut disabled = adopted;
     for name in &candidates {
         match niri_ipc::set_output_enabled(name, false) {
             Ok(()) => disabled.push(name.clone()),
