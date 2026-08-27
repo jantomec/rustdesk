@@ -14,61 +14,75 @@
 
 use hbb_common::{log, message_proto::CursorData};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::Mutex;
+use std::time::SystemTime;
 
-/// Stable id, distinct from XFixes serials and the hash-derived DRM ids.
-const ID: u64 = 0x6e69_7269_6375_7273; // "niricurs"
+/// Base id, distinct from XFixes serials and the hash-derived DRM ids. The
+/// served size is folded in so a live config change yields a new id and the
+/// MouseCursorService re-sends the (per-id cached) cursor.
+const ID_BASE: u64 = 0x6e69_7269_6375_0000; // "niricu" << 16
 
 pub fn cursor_id() -> Option<u64> {
     if !super::niri_virtual_display::takeover_active() {
         return None;
     }
-    cursor().as_ref().map(|_| ID)
+    cursor().map(|cd| cd.id)
 }
 
 pub fn cursor_data(hcursor: u64) -> Option<CursorData> {
-    if hcursor != ID {
+    if hcursor & !0xffff != ID_BASE {
         return None;
     }
-    cursor().clone()
+    cursor()
 }
 
-fn cursor() -> &'static Option<CursorData> {
-    static CACHE: OnceLock<Option<CursorData>> = OnceLock::new();
-    CACHE.get_or_init(|| match load() {
-        Some(cd) => {
-            log::info!(
-                "niri cursor: serving theme arrow {}x{} (hot {},{})",
-                cd.width,
-                cd.height,
-                cd.hotx,
-                cd.hoty
-            );
-            Some(cd)
+/// Cached arrow, reloaded whenever niri's config file mtime changes so a live
+/// `xcursor-size` edit takes effect without restarting the server.
+fn cursor() -> Option<CursorData> {
+    static CACHE: Mutex<Option<(Option<SystemTime>, Option<CursorData>)>> = Mutex::new(None);
+    let mtime = config_path()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok());
+    let mut guard = CACHE.lock().unwrap();
+    if let Some((cached_mtime, cd)) = &*guard {
+        if *cached_mtime == mtime {
+            return cd.clone();
         }
-        None => {
-            log::warn!("niri cursor: no Xcursor arrow found; falling back to XFixes");
-            None
-        }
-    })
+    }
+    let cd = load();
+    match &cd {
+        Some(cd) => log::info!(
+            "niri cursor: serving theme arrow {}x{} (hot {},{})",
+            cd.width,
+            cd.height,
+            cd.hotx,
+            cd.hoty
+        ),
+        None => log::warn!("niri cursor: no Xcursor arrow found; falling back to XFixes"),
+    }
+    *guard = Some((mtime, cd.clone()));
+    cd
 }
 
 /// The `cursor { xcursor-theme; xcursor-size }` block of niri's config. niri
 /// applies these itself but only exports them to processes it spawns later, so
 /// the config file is the source of truth; env vars and niri's documented
 /// defaults are the fallbacks.
+fn config_path() -> Option<PathBuf> {
+    std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config")))
+        .map(|d| d.join("niri/config.kdl"))
+}
+
 fn niri_cursor_config() -> (String, u32) {
     let mut theme = std::env::var("XCURSOR_THEME").unwrap_or_default();
     let mut size: u32 = std::env::var("XCURSOR_SIZE")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let config = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .ok()
-        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config")))
-        .map(|d| d.join("niri/config.kdl"));
-    if let Some(Ok(text)) = config.map(std::fs::read_to_string) {
+    if let Some(Ok(text)) = config_path().map(std::fs::read_to_string) {
         for line in text.lines() {
             let line = line.split("//").next().unwrap_or("").trim();
             if let Some(rest) = line.strip_prefix("xcursor-theme") {
@@ -111,7 +125,7 @@ fn load() -> Option<CursorData> {
     // Xcursor pixels are premultiplied; the XFixes and DRM paths pass
     // premultiplied RGBA through as-is, so do the same.
     let mut cd = CursorData::default();
-    cd.id = ID;
+    cd.id = ID_BASE | u64::from(best.size & 0xffff);
     cd.hotx = best.xhot as _;
     cd.hoty = best.yhot as _;
     cd.width = best.width as _;
