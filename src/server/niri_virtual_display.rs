@@ -272,6 +272,11 @@ fn acquire_blocking(epoch: u64) {
     *guard = Some(SessionTakeover { disabled });
 }
 
+/// Whether a session takeover currently has the physical outputs off.
+pub(super) fn takeover_active() -> bool {
+    TAKEOVER.lock().unwrap().is_some()
+}
+
 /// Last-remote-session-closed hook; restoration runs on a named thread.
 pub(super) fn session_takeover_release() {
     RELEASE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

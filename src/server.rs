@@ -48,6 +48,8 @@ pub(crate) mod wayland;
 pub(crate) mod drm_capturer;
 #[cfg(all(target_os = "linux", feature = "drm"))]
 pub(crate) mod niri_virtual_display;
+#[cfg(all(target_os = "linux", feature = "drm"))]
+pub(crate) mod niri_cursor;
 #[cfg(target_os = "linux")]
 pub mod uinput;
 #[cfg(target_os = "linux")]

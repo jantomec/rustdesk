@@ -560,6 +560,13 @@ pub fn get_focused_display(displays: Vec<DisplayInfo>) -> Option<usize> {
 }
 
 pub fn get_cursor() -> ResultType<Option<u64>> {
+    // Session takeover: the physical outputs are off, so neither the DRM cursor
+    // plane nor Xwayland's XFixes cursor reflects what niri would draw; serve
+    // the arrow from niri's own Xcursor theme instead.
+    #[cfg(feature = "drm")]
+    if let Some(id) = crate::server::niri_cursor::cursor_id() {
+        return Ok(Some(id));
+    }
     // DRM/KMS capture: the hardware cursor arrives over the `_drm` stream, not from XFixes.
     //
     // The MEMOISED `is_x11()` here, deliberately, unlike the capture-path callers that take the
@@ -602,6 +609,11 @@ pub fn get_cursor() -> ResultType<Option<u64>> {
 }
 
 pub fn get_cursor_data(hcursor: u64) -> ResultType<CursorData> {
+    // See get_cursor(): the takeover arrow is keyed by its own constant id.
+    #[cfg(feature = "drm")]
+    if let Some(cd) = crate::server::niri_cursor::cursor_data(hcursor) {
+        return Ok(cd);
+    }
     // DRM/KMS capture: return the latest hardware-cursor snapshot from the `_drm` stream. Its id may
     // have advanced past `hcursor` between get_cursor() and here, so return the latest rather than
     // bailing (which would trigger a MouseCursorService backoff).

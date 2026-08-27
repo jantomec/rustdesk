@@ -30,7 +30,7 @@ default = ["use_dasp"]
 hwcodec = ["scrap/hwcodec"]
 vram = ["scrap/vram"]
 mediacodec = ["scrap/mediacodec"]
-drm = ["scrap/drm"]
+drm = ["scrap/drm", "dep:xcursor"]
 # The display wake, as its OWN compile gate on top of `drm`. Everything else in the drm backend
 # READS (it captures a scanout); the wake WRITES, injecting one synthetic pointer event from the
 # root service so a compositor that idle-disabled its outputs re-enables them. That is a different
@@ -182,6 +182,7 @@ ttf-parser = "0.25"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libxdo-sys = "0.11"
+xcursor = { version = "0.3", optional = true }
 psimple = { package = "libpulse-simple-binding", version = "2.27" }
 pulse = { package = "libpulse-binding", version = "2.27" }
 rust-pulsectl = { git = "https://github.com/rustdesk-org/pulsectl" }
