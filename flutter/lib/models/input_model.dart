@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'dart:ui' as ui;
@@ -424,6 +423,10 @@ class InputModel {
   Timer? _flingTimer;
   final _flingBaseDelay = 30;
   final _trackpadAdjustPeerLinux = 0.06;
+  // Hi-res hosts turn 15 px into one wheel detent, which toolkits expand to
+  // ~3 lines (~50 px) - about 3.3x a local trackpad. Scale finger travel back
+  // so remote content tracks it roughly 1:1; wheel notches stay full-strength.
+  final _trackpadAdjustHiRes = 0.33;
   // This is an experience value.
   final _trackpadAdjustMacToWin = 2.50;
   // Ignore directional locking for very small deltas on both axes (including
@@ -1359,7 +1362,7 @@ class InputModel {
     var y = delta.dy.toInt();
     if (peerPlatform == kPeerPlatformLinux) {
       _trackpadScrollUnsent += _peerHiResScroll
-          ? delta
+          ? (delta * _trackpadAdjustHiRes)
           : (delta * _trackpadAdjustPeerLinux);
       x = _trackpadScrollUnsent.dx.truncate();
       y = _trackpadScrollUnsent.dy.truncate();
@@ -1425,10 +1428,11 @@ class InputModel {
       // Try set delta (x,y) and delay.
       var dx = x.toInt();
       var dy = y.toInt();
-      if (parent.target?.ffiModel.pi.platform == kPeerPlatformLinux &&
-          !_peerHiResScroll) {
-        dx = (x * _trackpadAdjustPeerLinux).toInt();
-        dy = (y * _trackpadAdjustPeerLinux).toInt();
+      if (parent.target?.ffiModel.pi.platform == kPeerPlatformLinux) {
+        final adjust =
+            _peerHiResScroll ? _trackpadAdjustHiRes : _trackpadAdjustPeerLinux;
+        dx = (x * adjust).toInt();
+        dy = (y * adjust).toInt();
       }
 
       // Pixel-precise hosts render each fling step, so pace them at display
