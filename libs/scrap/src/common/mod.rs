@@ -467,7 +467,8 @@ pub trait GoogleImage {
                     );
                 }
                 (Chroma::I420, ImageFormat::ARGB) => {
-                    super::I420ToARGB(
+                    convert::par_i420_to_rgb(
+                        super::I420ToARGB,
                         planes[0],
                         stride[0],
                         planes[1],
@@ -481,7 +482,8 @@ pub trait GoogleImage {
                     );
                 }
                 (Chroma::I420, ImageFormat::ABGR) => {
-                    super::I420ToABGR(
+                    convert::par_i420_to_rgb(
+                        super::I420ToABGR,
                         planes[0],
                         stride[0],
                         planes[1],
