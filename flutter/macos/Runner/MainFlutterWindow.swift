@@ -35,6 +35,32 @@ class RelativeMouseState {
     private init() {}
 }
 
+// Global state for edge resistance: while the pointer is over the remote view,
+// hold it at the view border until the user pushes ~threshold points outward,
+// then release it normally. Absolute pointing stays untouched inside the view.
+// Main-thread only, like RelativeMouseState.
+class EdgeResistanceState {
+    static let shared = EdgeResistanceState()
+
+    var enabled = false
+    weak var window: NSWindow?
+    // Remote-view rect in Flutter-view coordinates (top-left origin, points).
+    var rect = CGRect.zero
+    var threshold: CGFloat = 100
+    var accumX: CGFloat = 0
+    var accumY: CGFloat = 0
+    var lastOutwardAt: TimeInterval = 0
+    var eventMonitor: Any?
+
+    private init() {}
+
+    func resetAccumulators() {
+        accumX = 0
+        accumY = 0
+        lastOutwardAt = 0
+    }
+}
+
 class MainFlutterWindow: NSWindow {
     private static let fullscreenWorkAreaSizes = NSMapTable<NSWindow, NSValue>(
         keyOptions: [.weakMemory, .objectPointerPersonality],
@@ -238,6 +264,147 @@ class MainFlutterWindow: NSWindow {
         }
     }
 
+    /// Pointer location of `event` in Flutter-view coordinates (top-left
+    /// origin, points), or nil when the window has no content view.
+    private static func flutterViewPoint(of event: NSEvent, in window: NSWindow) -> CGPoint? {
+        guard let contentView = window.contentView else { return nil }
+        var p = contentView.convert(event.locationInWindow, from: nil)
+        if !contentView.isFlipped {
+            p.y = contentView.bounds.height - p.y
+        }
+        return p
+    }
+
+    /// Warp the hardware cursor to a Flutter-view point (top-left origin) and
+    /// cancel the post-warp motion suppression (see the bumpMouse comment).
+    private static func warpToFlutterPoint(_ p: CGPoint, in window: NSWindow) {
+        guard let contentView = window.contentView,
+              let primaryScreen = NSScreen.screens.first else { return }
+        var viewPoint = p
+        if !contentView.isFlipped {
+            viewPoint.y = contentView.bounds.height - viewPoint.y
+        }
+        let windowPoint = contentView.convert(viewPoint, to: nil)
+        let screenPoint = window.convertPoint(toScreen: windowPoint)
+        let cgPoint = CGPoint(x: screenPoint.x, y: primaryScreen.frame.height - screenPoint.y)
+        CGWarpMouseCursorPosition(cgPoint)
+        if !RelativeMouseState.shared.enabled {
+            CGAssociateMouseAndMouseCursorPosition(1)
+        }
+    }
+
+    private func enableEdgeResistance(window: NSWindow, rect: CGRect, threshold: CGFloat) -> Bool {
+        assert(Thread.isMainThread, "enableEdgeResistance must be called on the main thread")
+        let state = EdgeResistanceState.shared
+        state.window = window
+        state.rect = rect
+        state.threshold = threshold
+        state.resetAccumulators()
+        if state.enabled { return true }
+
+        state.eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]) { [weak state] event in
+            guard let state = state else { return event }
+            return MainFlutterWindow.handleEdgeResistanceEvent(state, event)
+        }
+        if state.eventMonitor == nil {
+            NSLog("[RustDesk] Failed to create event monitor for edge resistance")
+            return false
+        }
+        state.enabled = true
+        return true
+    }
+
+    private func disableEdgeResistance() {
+        assert(Thread.isMainThread, "disableEdgeResistance must be called on the main thread")
+        let state = EdgeResistanceState.shared
+        state.enabled = false
+        if let monitor = state.eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            state.eventMonitor = nil
+        }
+        state.window = nil
+        state.resetAccumulators()
+    }
+
+    private static func handleEdgeResistanceEvent(_ state: EdgeResistanceState, _ event: NSEvent) -> NSEvent? {
+        // Pass everything through untouched unless resistance is armed for
+        // exactly this window and no pointer lock owns the cursor.
+        guard state.enabled,
+              !RelativeMouseState.shared.enabled,
+              let window = state.window,
+              event.window === window,
+              window.isKeyWindow,
+              !state.rect.isEmpty,
+              let p = flutterViewPoint(of: event, in: window) else {
+            return event
+        }
+
+        if state.rect.contains(p) {
+            state.resetAccumulators()
+            return event
+        }
+
+        // Accumulate only the outward-normal delta component at each violated
+        // edge; motion along the border never counts. NSEvent deltaY is
+        // positive downward, matching the top-left view coordinates.
+        let now = ProcessInfo.processInfo.systemUptime
+        if state.lastOutwardAt > 0 && now - state.lastOutwardAt > 0.5 {
+            state.resetAccumulators()
+        }
+        if p.x < state.rect.minX {
+            state.accumX += max(0, -event.deltaX)
+        } else if p.x >= state.rect.maxX {
+            state.accumX += max(0, event.deltaX)
+        } else {
+            state.accumX = 0
+        }
+        if p.y < state.rect.minY {
+            state.accumY += max(0, -event.deltaY)
+        } else if p.y >= state.rect.maxY {
+            state.accumY += max(0, event.deltaY)
+        } else {
+            state.accumY = 0
+        }
+        state.lastOutwardAt = now
+
+        if state.accumX >= state.threshold || state.accumY >= state.threshold {
+            // Push-through: single-shot release. The event passes unmodified,
+            // Flutter dispatches the pointer-exit, and the Dart side disarms.
+            state.enabled = false
+            return event
+        }
+
+        // Hold: warp the hardware cursor back to the border (1 pt inset keeps
+        // the point inside Flutter's hit test) and hand Flutter a replacement
+        // event at the clamped location so the remote cursor rides the border.
+        let clamped = CGPoint(
+            x: min(max(p.x, state.rect.minX), state.rect.maxX - 1),
+            y: min(max(p.y, state.rect.minY), state.rect.maxY - 1)
+        )
+        warpToFlutterPoint(clamped, in: window)
+        if let cgEvent = event.cgEvent?.copy() {
+            var viewPoint = clamped
+            if let contentView = window.contentView {
+                if !contentView.isFlipped {
+                    viewPoint.y = contentView.bounds.height - viewPoint.y
+                }
+                let windowPoint = contentView.convert(viewPoint, to: nil)
+                let screenPoint = window.convertPoint(toScreen: windowPoint)
+                if let primaryScreen = NSScreen.screens.first {
+                    cgEvent.location = CGPoint(
+                        x: screenPoint.x,
+                        y: primaryScreen.frame.height - screenPoint.y)
+                    if let replacement = NSEvent(cgEvent: cgEvent) {
+                        return replacement
+                    }
+                }
+            }
+        }
+        // Replacement construction failed: swallow the escaping event; the
+        // cursor was already warped back.
+        return nil
+    }
+
     public func setMethodHandler(registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: "org.rustdesk.rustdesk/host", binaryMessenger: registrar.messenger)
         channel.setMethodCallHandler({
@@ -336,6 +503,37 @@ class MainFlutterWindow: NSWindow {
 
                 case "disableNativeRelativeMouseMode":
                     self.disableNativeRelativeMouseMode()
+                    result(true)
+
+                case "enableEdgeResistance":
+                    guard Thread.isMainThread,
+                          let window = registrar.view?.window,
+                          let arg = call.arguments as? [String: Any],
+                          let left = arg["left"] as? Double,
+                          let top = arg["top"] as? Double,
+                          let width = arg["width"] as? Double,
+                          let height = arg["height"] as? Double else {
+                        result(false)
+                        break
+                    }
+                    let threshold = (arg["threshold"] as? Double) ?? 100
+                    let rect = CGRect(x: left, y: top, width: width, height: height)
+                    result(self.enableEdgeResistance(window: window, rect: rect, threshold: CGFloat(threshold)))
+
+                case "updateEdgeResistanceRect":
+                    if Thread.isMainThread,
+                       let arg = call.arguments as? [String: Any],
+                       let left = arg["left"] as? Double,
+                       let top = arg["top"] as? Double,
+                       let width = arg["width"] as? Double,
+                       let height = arg["height"] as? Double {
+                        EdgeResistanceState.shared.rect =
+                            CGRect(x: left, y: top, width: width, height: height)
+                    }
+                    result(nil)
+
+                case "disableEdgeResistance":
+                    self.disableEdgeResistance()
                     result(true)
 
                 case "getMacOSScreenGeometry":

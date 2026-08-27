@@ -18,6 +18,9 @@ const kKeyMapMode = 'map';
 const kKeyTranslateMode = 'translate';
 
 const String kPlatformAdditionsIsWayland = "is_wayland";
+// The host emits pixel-precise scrolling (REL_WHEEL_HI_RES) for trackpad
+// messages, so the client should send pixel deltas instead of wheel ticks.
+const String kPlatformAdditionsHiResScroll = "hi_res_scroll";
 const String kPlatformAdditionsIsInstalled = "is_installed";
 const String kPlatformAdditionsIddImpl = "idd_impl";
 const String kPlatformAdditionsRustDeskVirtualDisplays =
@@ -147,6 +150,12 @@ const String kOptionCodecPreference = "codec-preference";
 // Per-peer (Flutter option): keep a virtual display sized to this client's
 // viewport automatically. Default on; only an explicit 'N' disables it.
 const String kOptionAutoFitVirtualDisplay = "auto-fit-virtual-display";
+// Per-peer (Flutter option): hold the pointer at the remote-view border until
+// pushed through (macOS only). Default on; only an explicit 'N' disables it.
+const String kOptionEdgeResistance = "edge-resistance";
+// Outward motion (logical points) needed to push the pointer through the
+// remote-view border while edge resistance holds it.
+const double kEdgeResistanceThreshold = 100.0;
 const String kOptionRemoteMenubarDragLeft = "remote-menubar-drag-left";
 const String kOptionRemoteMenubarDragRight = "remote-menubar-drag-right";
 const String kOptionRemoteMenubarEdge = "remote-menubar-edge";

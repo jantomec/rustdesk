@@ -14,6 +14,7 @@ import 'package:flutter_hbb/common/widgets/peers_view.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/ab_model.dart';
 import 'package:flutter_hbb/models/auto_fit_model.dart';
+import 'package:flutter_hbb/models/edge_resistance_model.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/cm_file_model.dart';
 import 'package:flutter_hbb/models/file_model.dart';
@@ -1420,6 +1421,7 @@ class FfiModel with ChangeNotifier {
       // directly so the user doesn't have to pick it in the monitor menu.
       // Reuses the monitor-restore path applied after the first image.
       await parent.target?.autoFitModel.loadEnabled();
+      await parent.target?.edgeResistanceModel.loadEnabled();
       if (!isCache &&
           pendingMonitorRestore == null &&
           (parent.target?.autoFitModel.enabled ?? false) &&
@@ -3730,6 +3732,7 @@ class FFI {
   late final CmFileModel cmFileModel; // cm
   late final TextureModel textureModel; //session
   late final AutoFitModel autoFitModel; // session
+  late final EdgeResistanceModel edgeResistanceModel; // session
   late final Peers recentPeersModel; // global
   late final Peers favoritePeersModel; // global
   late final Peers lanPeersModel; // global
@@ -3760,6 +3763,7 @@ class FFI {
     cmFileModel = CmFileModel(WeakReference(this));
     textureModel = TextureModel(WeakReference(this));
     autoFitModel = AutoFitModel(WeakReference(this));
+    edgeResistanceModel = EdgeResistanceModel(WeakReference(this));
     recentPeersModel = Peers(
         name: PeersModelName.recent,
         loadEvent: LoadEvent.recent,
@@ -4046,6 +4050,7 @@ class FFI {
   Future<void> close({bool closeSession = true}) async {
     closed = true;
     autoFitModel.dispose();
+    edgeResistanceModel.dispose();
     if (isWeb) {
       platformFFI.clearVideoFrameCallback();
     }
@@ -4193,6 +4198,8 @@ class PeerInfo with ChangeNotifier {
   RxBool isSet = false.obs;
 
   bool get isWayland => platformAdditions[kPlatformAdditionsIsWayland] == true;
+  bool get isHiResScroll =>
+      platformAdditions[kPlatformAdditionsHiResScroll] == true;
   bool get isInstalled =>
       platform != kPeerPlatformWindows ||
       platformAdditions[kPlatformAdditionsIsInstalled] == true;

@@ -481,6 +481,12 @@ class InputModel {
   bool get keyboardPerm => parent.target!.ffiModel.keyboard;
   String get id => parent.target?.id ?? '';
   String? get peerPlatform => parent.target?.ffiModel.pi.platform;
+
+  // The host turns trackpad messages into pixel-precise scrolling
+  // (REL_WHEEL_HI_RES), so pixel deltas must be preserved instead of being
+  // quantized to wheel ticks.
+  bool get _peerHiResScroll =>
+      parent.target?.ffiModel.pi.isHiResScroll ?? false;
   String get peerVersion => parent.target?.ffiModel.pi.version ?? '';
   bool get isViewOnly => parent.target!.ffiModel.viewOnly;
   bool get showMyCursor => parent.target!.ffiModel.showMyCursor;
@@ -1352,7 +1358,9 @@ class InputModel {
     var x = delta.dx.toInt();
     var y = delta.dy.toInt();
     if (peerPlatform == kPeerPlatformLinux) {
-      _trackpadScrollUnsent += (delta * _trackpadAdjustPeerLinux);
+      _trackpadScrollUnsent += _peerHiResScroll
+          ? delta
+          : (delta * _trackpadAdjustPeerLinux);
       x = _trackpadScrollUnsent.dx.truncate();
       y = _trackpadScrollUnsent.dy.truncate();
       _trackpadScrollUnsent -= Offset(x.toDouble(), y.toDouble());
@@ -1417,12 +1425,15 @@ class InputModel {
       // Try set delta (x,y) and delay.
       var dx = x.toInt();
       var dy = y.toInt();
-      if (parent.target?.ffiModel.pi.platform == kPeerPlatformLinux) {
+      if (parent.target?.ffiModel.pi.platform == kPeerPlatformLinux &&
+          !_peerHiResScroll) {
         dx = (x * _trackpadAdjustPeerLinux).toInt();
         dy = (y * _trackpadAdjustPeerLinux).toInt();
       }
 
-      var delay = _flingBaseDelay;
+      // Pixel-precise hosts render each fling step, so pace them at display
+      // rate instead of the coarse tick cadence.
+      var delay = _peerHiResScroll ? 16 : _flingBaseDelay;
 
       if (dx == 0 && dy == 0) {
         _fling = false;
@@ -1437,16 +1448,14 @@ class InputModel {
   }
 
   void waitLastFlingDone() {
+    // No waiting needed: timer callbacks cannot run while this isolate is
+    // busy anyway (the old sleep loop could never observe a change), so
+    // cancelling the timer fully stops the fling.
     if (_fling) {
       _stopFling = true;
     }
-    for (var i = 0; i < 5; i++) {
-      if (!_fling) {
-        break;
-      }
-      sleep(Duration(milliseconds: 10));
-    }
     _flingTimer?.cancel();
+    _fling = false;
   }
 
   void onPointerPanZoomEnd(PointerPanZoomEndEvent e) {
@@ -1686,6 +1695,22 @@ class InputModel {
         dy = 0;
       } else {
         dx = 0;
+      }
+      if (_peerHiResScroll && peerPlatform == kPeerPlatformLinux) {
+        // Preserve the wheel magnitude: send inverted pixel deltas through
+        // the trackpad channel instead of quantizing to +-1 ticks. (The
+        // wheel path inverts signs relative to panDelta, see below.)
+        _trackpadScrollUnsent +=
+            Offset(dy == 0 ? -rawDx : 0, dx == 0 ? -rawDy : 0);
+        final px = _trackpadScrollUnsent.dx.truncate();
+        final py = _trackpadScrollUnsent.dy.truncate();
+        _trackpadScrollUnsent -= Offset(px.toDouble(), py.toDouble());
+        if (px != 0 || py != 0) {
+          bind.sessionSendMouse(
+              sessionId: sessionId,
+              msg: '{"type": "trackpad", "x": "$px", "y": "$py"}');
+        }
+        return;
       }
       if (dx > 0) {
         dx = -accel;

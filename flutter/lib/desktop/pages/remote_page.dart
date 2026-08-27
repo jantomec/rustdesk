@@ -486,6 +486,7 @@ class _RemotePageState extends State<RemotePage>
     }
     stateGlobal.isFocused.value = false;
     _syncMacOSKeyboardGrab();
+    _ffi.edgeResistanceModel.disarm();
 
     // When window loses focus, temporarily release relative mouse mode constraints
     // to allow user to interact with other applications normally.
@@ -616,6 +617,7 @@ class _RemotePageState extends State<RemotePage>
   void onWindowMinimize() {
     super.onWindowMinimize();
     WakelockManager.disable(_uniqueKey);
+    _ffi.edgeResistanceModel.disarm();
     if (isMacOS) {
       _macOSFullScreenFocusRecovery.cancel();
       _isWindowBlur = true;
@@ -849,6 +851,7 @@ class _RemotePageState extends State<RemotePage>
 
     _cursorOverImage.value = true;
     _firstEnterImage.value = true;
+    _ffi.edgeResistanceModel.arm();
     if (_onEnterOrLeaveImage4Toolbar != null) {
       try {
         _onEnterOrLeaveImage4Toolbar!(true);
@@ -880,6 +883,7 @@ class _RemotePageState extends State<RemotePage>
   }
 
   void leaveView(PointerExitEvent evt) {
+    _ffi.edgeResistanceModel.disarm();
     _ffi.canvasModel.disableEdgeScroll();
 
     if (_ffi.ffiModel.keyboard) {
@@ -967,6 +971,7 @@ class _RemotePageState extends State<RemotePage>
         child: _ViewStyleUpdater(
           canvasModel: _ffi.canvasModel,
           inputModel: _ffi.inputModel,
+          onViewRectChanged: _ffi.edgeResistanceModel.updateViewRect,
           child: Builder(builder: (context) {
             final peerDisplay = CurrentDisplayState.find(widget.id);
             return Obx(
@@ -1025,12 +1030,16 @@ class _ViewStyleUpdater extends StatefulWidget {
   final CanvasModel canvasModel;
   final InputModel inputModel;
   final Widget child;
+  // Reports the view area in Flutter-view coordinates after each layout
+  // change (edge resistance keeps its clamp rect in sync through this).
+  final void Function(Rect)? onViewRectChanged;
 
   const _ViewStyleUpdater({
     Key? key,
     required this.canvasModel,
     required this.inputModel,
     required this.child,
+    this.onViewRectChanged,
   }) : super(key: key);
 
   @override
@@ -1065,6 +1074,13 @@ class _ViewStyleUpdaterState extends State<_ViewStyleUpdater> {
               if (mounted && currentSize != null) {
                 widget.canvasModel.updateViewStyle();
                 widget.inputModel.updateImageWidgetSize(currentSize);
+                final onRect = widget.onViewRectChanged;
+                if (onRect != null) {
+                  final box = context.findRenderObject() as RenderBox?;
+                  if (box != null && box.attached && box.hasSize) {
+                    onRect(box.localToGlobal(Offset.zero) & box.size);
+                  }
+                }
               }
             });
           }
@@ -1272,7 +1288,9 @@ class _ImagePaintState extends State<ImagePaint> {
 
   MouseCursor _buildCustomCursor(BuildContext context, double scale) {
     final cursor = Provider.of<CursorModel>(context);
-    final cache = cursor.cache ?? preDefaultCursor.cache;
+    // A peer that never sends CursorData (e.g. a Wayland host) has no cache; on
+    // macOS the native arrow beats the ring-glyph fallback there.
+    final cache = cursor.cache ?? (isMacOS ? null : preDefaultCursor.cache);
     return buildCursorOfCache(cursor, scale, cache);
   }
 

@@ -808,6 +808,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       if ((privacyModeState.isEmpty ||
               allowDisplaySwitchInPrivacyMode(pi, privacyModeState.value)) &&
           pi.displaysCount.value > 1 &&
+          !widget.ffi.autoFitModel.activeRx.value &&
           mainGetLocalBoolOptionSync(kOptionAllowMonitorSwitchMainToolbar)) {
         return _MainMonitorSwitchButton(id: widget.id, ffi: widget.ffi);
       } else {
@@ -822,7 +823,8 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       final privacyModeState = PrivacyModeState.find(widget.id);
       if ((privacyModeState.isEmpty ||
               allowDisplaySwitchInPrivacyMode(pi, privacyModeState.value)) &&
-          pi.displaysCount.value > 1) {
+          pi.displaysCount.value > 1 &&
+          !widget.ffi.autoFitModel.activeRx.value) {
         return _MonitorMenu(
             id: widget.id,
             ffi: widget.ffi,
@@ -1730,16 +1732,22 @@ class _DisplayMenuState extends State<_DisplayMenu> {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     menuChildrenGetter(_IconSubmenuButtonState state) {
+      // While auto-fit drives the geometry the image is always edge-to-edge
+      // and 1:1, so window-adjust, view style, scroll style and the manual
+      // resolution menu have nothing left to control.
+      final autoFitActive = ffi.autoFitModel.active;
       final menuChildren = <Widget>[
         if (ffi.connType == ConnType.defaultConn &&
             ffiModel.isVirtualDisplayResolution)
           autoFitToggle(),
-        _screenAdjustor.adjustWindow(context),
-        viewStyle(customPercent: _customPercent),
-        scrollStyle(state, colorScheme),
+        if (isMacOS && ffi.connType == ConnType.defaultConn)
+          edgeResistanceToggle(),
+        if (!autoFitActive) _screenAdjustor.adjustWindow(context),
+        if (!autoFitActive) viewStyle(customPercent: _customPercent),
+        if (!autoFitActive) scrollStyle(state, colorScheme),
         imageQuality(),
         codec(),
-        if (ffi.connType == ConnType.defaultConn)
+        if (ffi.connType == ConnType.defaultConn && !autoFitActive)
           _ResolutionsMenu(
             id: widget.id,
             ffi: widget.ffi,
@@ -1807,6 +1815,19 @@ class _DisplayMenuState extends State<_DisplayMenu> {
         if (mounted) setState(() {});
       },
       child: Text(translate("Auto size to window")),
+      ffi: ffi,
+    );
+  }
+
+  edgeResistanceToggle() {
+    return CkbMenuButton(
+      value: ffi.edgeResistanceModel.enabled,
+      onChanged: (value) async {
+        if (value == null) return;
+        await ffi.edgeResistanceModel.setEnabled(value);
+        if (mounted) setState(() {});
+      },
+      child: Text(translate("Hold cursor at window edge")),
       ffi: ffi,
     );
   }
@@ -3761,6 +3782,7 @@ class _MinimizedMonitorSwitchButton extends StatelessWidget {
         return const Offstage();
       }
       if (cycle.total < 2) return const Offstage();
+      if (ffi.autoFitModel.activeRx.value) return const Offstage();
       final privacyModeState = PrivacyModeState.find(id);
       if (privacyModeState.isNotEmpty &&
           !allowDisplaySwitchInPrivacyMode(

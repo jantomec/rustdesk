@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:get/get.dart';
 
 import '../common.dart';
 import '../consts.dart';
@@ -37,6 +38,10 @@ class AutoFitModel {
   /// Auto mode is only meaningful while the current display is a virtual one.
   bool get active => enabled && (_ffiModel?.isVirtualDisplayResolution ?? false);
 
+  /// Reactive mirror of [active] for UI gates (the toolbar hides its display
+  /// selector and resolution menus while auto mode drives the geometry).
+  final activeRx = false.obs;
+
   Future<void> loadEnabled() async {
     final sessionId = parent.target?.sessionId;
     if (sessionId == null) return;
@@ -44,10 +49,12 @@ class AutoFitModel {
         sessionId: sessionId, k: kOptionAutoFitVirtualDisplay);
     // Default is on; only an explicit 'N' disables it.
     _enabledCache = v != 'N';
+    activeRx.value = active;
   }
 
   Future<void> setEnabled(bool v) async {
     _enabledCache = v;
+    activeRx.value = active;
     final sessionId = parent.target?.sessionId;
     if (sessionId == null) return;
     await bind.sessionSetFlutterOption(
@@ -66,6 +73,7 @@ class AutoFitModel {
     final ffi = parent.target;
     final ffiModel = _ffiModel;
     if (ffi == null || ffiModel == null || ffi.closed) return;
+    activeRx.value = active;
     if (!active) return;
     if (ffiModel.pi.currentDisplay == kAllDisplayValue) return;
 
