@@ -250,7 +250,7 @@ impl VideoQoS {
         let target_ratio = self.latest_quality().ratio();
 
         // For bad network, small fps means quick reaction and high quality
-        let (min_fps, normal_fps) = if target_ratio >= BR_BEST {
+        let (min_fps, _normal_fps) = if target_ratio >= BR_BEST {
             (8, 16)
         } else if target_ratio >= BR_BALANCED {
             (10, 20)
@@ -264,33 +264,22 @@ impl VideoQoS {
         let mut adjust_ratio = false;
         if let Some(user) = self.users.get_mut(&id) {
             let delay = delay.max(10);
-            let old_avg_delay = user.delay.avg_delay();
+            let _old_avg_delay = user.delay.avg_delay();
             user.delay.add_delay(delay);
             let mut avg_delay = user.delay.avg_delay();
             avg_delay = avg_delay.max(10);
             let mut fps = self.fps;
 
             // Adaptive FPS adjustment based on network delay:
-            if avg_delay < 50 {
-                user.delay.quick_increase_fps_count += 1;
-                let mut step = if fps < normal_fps { 1 } else { 0 };
-                if user.delay.quick_increase_fps_count >= 3 {
-                    // After 3 consecutive good samples, increase more aggressively
-                    user.delay.quick_increase_fps_count = 0;
-                    step = 5;
-                }
-                fps = min_fps.max(fps + step);
-            } else if avg_delay < 100 {
-                let step = if avg_delay < old_avg_delay {
-                    if fps < normal_fps {
-                        1
-                    } else {
-                        0
-                    }
-                } else {
-                    0
-                };
-                fps = min_fps.max(fps + step);
+            if avg_delay < 100 {
+                // Healthy link: go straight to the client's advertised target.
+                // Upstream crept +1..+5 per 3 s and froze in the 50-100 ms
+                // band, which left a damage-gated stream at a fraction of the
+                // achievable rate for many seconds after every idle period.
+                // With the encoder's one-frame VBV a single frame cannot swamp
+                // the link, so the slow ramp buys nothing; delays >=150 ms
+                // below remain the brake for real congestion.
+                fps = highest_fps;
             } else if avg_delay < DELAY_THRESHOLD_150MS {
                 fps = min_fps.max(fps);
             } else {
