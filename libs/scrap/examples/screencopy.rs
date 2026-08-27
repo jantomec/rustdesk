@@ -1,6 +1,9 @@
 //! Timing probe: capture a named output N times through wlr-screencopy, print per-frame latency.
 //!
-//!     screencopy OUTPUT WIDTH HEIGHT out.ppm [N] [embed_cursor(0|1)]
+//!     screencopy OUTPUT WIDTH HEIGHT out.ppm [N] [embed_cursor(0|1)] [work_ms] [full(0|1)]
+//!
+//! `work_ms` sleeps between frames to emulate a convert+encode cycle; `full` forces
+//! plain copies (no damage gating), the pre-damage-tracking behavior.
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 fn main() {
     use scrap::wayland::screencopy::ScreencopyCapturer;
@@ -18,6 +21,7 @@ fn main() {
     let embed = args.get(6).map(|s| s == "1").unwrap_or(true);
     let work_ms: u64 = args.get(7).map(|s| s.parse().unwrap()).unwrap_or(0);
     let mut cap = ScreencopyCapturer::new(name, w, h, embed).expect("create capturer");
+    cap.always_copy = args.get(8).map(|s| s == "1").unwrap_or(false);
     let mut last = None;
     let mut times = Vec::with_capacity(n);
     let t0 = Instant::now();

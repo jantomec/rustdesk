@@ -11,6 +11,13 @@
 //! second buffer, so the compositor renders and copies frame N+1 while the caller
 //! converts and encodes frame N. At 5K the request-to-ready time is ~9 ms, which a
 //! serial request would add to every encode cycle.
+//!
+//! After the first frame, requests are `capture_output_with_damage`: a static
+//! screen completes no copies (the caller sees WouldBlock and encodes nothing)
+//! and the first change completes the pending copy immediately. niri's per-queue
+//! damage tracker compares against the last frame it rendered for us, so damage
+//! that lands between two requests is not lost. With the cursor un-embedded,
+//! pointer motion alone wakes nothing - the client draws its own pointer.
 
 use std::io;
 use std::os::fd::AsRawFd;
@@ -144,6 +151,14 @@ pub struct ScreencopyCapturer {
     /// the buffer its copy writes into.
     in_flight: Option<(ZwlrScreencopyFrameV1, usize)>,
     next_idx: usize,
+    /// Whether at least one frame has been delivered. Once primed, requests use
+    /// `capture_output_with_damage`, so a static screen produces no frames (the
+    /// video loop sees WouldBlock) instead of an identical full encode per tick.
+    /// The first request must be a plain copy: with_damage on a static screen
+    /// would never complete and the session would open to nothing.
+    primed: bool,
+    /// Diagnostic override (see the screencopy example): always use plain copies.
+    pub always_copy: bool,
     /// Geometry this capturer was built for; a mismatch means the output was resized and
     /// the video service must rebuild with the new size.
     session_size: (u32, u32),
@@ -211,6 +226,8 @@ impl ScreencopyCapturer {
             buffers: [None, None],
             in_flight: None,
             next_idx: 0,
+            primed: false,
+            always_copy: false,
             session_size: (width as u32, height as u32),
             overlay_cursor: overlay_cursor as i32,
             flipped: Vec::new(),
@@ -252,7 +269,11 @@ impl ScreencopyCapturer {
             self.buffers[idx] = Some((buffer, params));
         }
         let (buffer, _) = self.buffers[idx].as_ref().expect("buffer present");
-        frame.copy(buffer.wl_buffer());
+        if self.primed && !self.always_copy {
+            frame.copy_with_damage(buffer.wl_buffer());
+        } else {
+            frame.copy(buffer.wl_buffer());
+        }
         // Flush now: the whole point of the pre-request is that the compositor
         // renders during the caller's convert+encode window, and without a flush
         // the copy request would sit in the client send buffer until the next
@@ -345,6 +366,7 @@ impl TraitCapturer for ScreencopyCapturer {
         if let Some(Err(msg)) = done {
             return Err(other(format!("screencopy of {}: {msg}", self.name)));
         }
+        self.primed = true;
         let (_, (width, height, stride, format)) =
             self.buffers[idx].as_ref().expect("buffer present");
         let (width, height, stride, format) = (*width, *height, *stride, *format);
