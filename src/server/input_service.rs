@@ -2401,14 +2401,18 @@ pub fn wayland_use_uinput() -> bool {
 
 /// Whether trackpad messages are interpreted (and advertised via PeerInfo's
 /// `hi_res_scroll`) as pixel deltas for the hi-res uinput wheel.
+///
+/// Deliberately NOT tied to `wayland_use_uinput()`: `is_x11()` latches from
+/// loginctl heuristics that mis-answer on some seats (see the drm-warm
+/// comment in server.rs), and a wrong advertisement is harmless anyway - the
+/// enigo pixel methods degrade to wheel detents on non-uinput backends.
 #[inline]
 #[cfg(target_os = "linux")]
 pub fn hi_res_scroll_enabled() -> bool {
-    wayland_use_uinput()
-        && hbb_common::config::option2bool(
-            "enable-hi-res-scroll",
-            &hbb_common::config::Config::get_option("enable-hi-res-scroll"),
-        )
+    hbb_common::config::option2bool(
+        "enable-hi-res-scroll",
+        &hbb_common::config::Config::get_option("enable-hi-res-scroll"),
+    )
 }
 
 #[inline]
