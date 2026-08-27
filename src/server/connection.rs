@@ -1110,10 +1110,36 @@ impl Connection {
         }
         #[cfg(target_os = "macos")]
         reset_input_ondisconn();
+        // A message dequeued while coalescing moves, to be processed next.
+        let mut carried: Option<MessageInput> = None;
         loop {
-            match receiver.recv_timeout(std::time::Duration::from_millis(500)) {
+            let recvd = match carried.take() {
+                Some(v) => Ok(v),
+                None => receiver.recv_timeout(std::time::Duration::from_millis(500)),
+            };
+            match recvd {
                 Ok(v) => match v {
-                    MessageInput::Mouse(mouse_input) => {
+                    MessageInput::Mouse(mut mouse_input) => {
+                        // The executor (uinput write + pacing sleep) is slower
+                        // than the client's pointer-event rate; replaying a
+                        // backlog of stale positions only grows the lag, so
+                        // coalesce runs of queued pure moves to the newest.
+                        if mouse_input.msg.mask & 0x7 == crate::input::MOUSE_TYPE_MOVE {
+                            while let Ok(next) = receiver.try_recv() {
+                                match next {
+                                    MessageInput::Mouse(n)
+                                        if n.msg.mask & 0x7 == crate::input::MOUSE_TYPE_MOVE
+                                            && n.conn_id == mouse_input.conn_id =>
+                                    {
+                                        mouse_input = n;
+                                    }
+                                    other => {
+                                        carried = Some(other);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         handle_mouse(
                             &mouse_input.msg,
                             mouse_input.conn_id,
@@ -1799,6 +1825,9 @@ impl Connection {
             if crate::platform::current_is_wayland() {
                 platform_additions.insert("is_wayland".into(), json!(true));
             }
+            if super::input_service::hi_res_scroll_enabled() {
+                platform_additions.insert("hi_res_scroll".into(), json!(true));
+            }
         }
         #[cfg(target_os = "windows")]
         {
@@ -2127,6 +2156,10 @@ impl Connection {
                     }
                 }
             }
+        }
+        #[cfg(all(target_os = "linux", feature = "drm"))]
+        if self.is_remote() {
+            super::niri_virtual_display::session_takeover_acquire();
         }
     }
 
@@ -6695,6 +6728,8 @@ mod raii {
                 .filter(|c| c.conn_type == AuthConnType::Remote)
                 .count();
             if remote_count == 0 {
+                #[cfg(all(target_os = "linux", feature = "drm"))]
+                niri_virtual_display::session_takeover_release();
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
                 {
                     *WALLPAPER_REMOVER.lock().unwrap() = None;

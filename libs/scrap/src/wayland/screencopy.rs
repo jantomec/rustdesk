@@ -132,6 +132,9 @@ pub struct ScreencopyCapturer {
     /// Geometry this capturer was built for; a mismatch means the output was resized and
     /// the video service must rebuild with the new size.
     session_size: (u32, u32),
+    /// wlr-screencopy `overlay_cursor` flag: 1 composites the cursor into the
+    /// frames, 0 leaves it out (the client then draws its own pointer).
+    overlay_cursor: i32,
     flipped: Vec<u8>,
 }
 
@@ -141,7 +144,12 @@ fn other<E: std::fmt::Display>(e: E) -> io::Error {
 
 impl ScreencopyCapturer {
     /// `width`/`height` are the physical size the display was advertised with.
-    pub fn new(output_name: &str, width: usize, height: usize) -> io::Result<Self> {
+    pub fn new(
+        output_name: &str,
+        width: usize,
+        height: usize,
+        overlay_cursor: bool,
+    ) -> io::Result<Self> {
         let conn = Connection::connect_to_env().map_err(other)?;
         let (globals, mut queue) = registry_queue_init::<State>(&conn).map_err(other)?;
         let qh = queue.handle();
@@ -183,6 +191,7 @@ impl ScreencopyCapturer {
             pool,
             buffer: None,
             session_size: (width as u32, height as u32),
+            overlay_cursor: overlay_cursor as i32,
             flipped: Vec::new(),
         })
     }
@@ -243,7 +252,9 @@ impl TraitCapturer for ScreencopyCapturer {
     fn frame<'a>(&'a mut self, timeout: Duration) -> io::Result<Frame<'a>> {
         let deadline = Instant::now() + timeout;
         self.state.pending = Pending::default();
-        let frame = self.manager.capture_output(1, &self.output, &self.qh, ());
+        let frame = self
+            .manager
+            .capture_output(self.overlay_cursor, &self.output, &self.qh, ());
 
         if let Err(e) = self.wait_until(deadline, has_params) {
             frame.destroy();

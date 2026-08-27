@@ -1272,11 +1272,30 @@ pub fn handle_mouse_simulation_(evt: &MouseEvent, conn: i32) {
 
             #[cfg(not(target_os = "macos"))]
             {
-                if y != 0 {
-                    en.mouse_scroll_y(y);
-                }
-                if x != 0 {
-                    en.mouse_scroll_x(x);
+                // Clients that saw `hi_res_scroll` in PeerInfo send trackpad
+                // messages in pixel units; route those to the hi-res wheel.
+                // The same `enable-hi-res-scroll` option gates the PeerInfo
+                // advertisement, so flipping it to N restores the stock
+                // tick interpretation for old clients without a rebuild.
+                #[cfg(target_os = "linux")]
+                let use_pixel_scroll =
+                    evt_type == MOUSE_TYPE_TRACKPAD && hi_res_scroll_enabled();
+                #[cfg(not(target_os = "linux"))]
+                let use_pixel_scroll = false;
+                if use_pixel_scroll {
+                    if y != 0 {
+                        en.mouse_scroll_pixel_y(y);
+                    }
+                    if x != 0 {
+                        en.mouse_scroll_pixel_x(x);
+                    }
+                } else {
+                    if y != 0 {
+                        en.mouse_scroll_y(y);
+                    }
+                    if x != 0 {
+                        en.mouse_scroll_x(x);
+                    }
                 }
             }
         }
@@ -2378,6 +2397,18 @@ async fn send_sas() -> ResultType<()> {
 #[cfg(target_os = "linux")]
 pub fn wayland_use_uinput() -> bool {
     !crate::platform::is_x11() && crate::is_server()
+}
+
+/// Whether trackpad messages are interpreted (and advertised via PeerInfo's
+/// `hi_res_scroll`) as pixel deltas for the hi-res uinput wheel.
+#[inline]
+#[cfg(target_os = "linux")]
+pub fn hi_res_scroll_enabled() -> bool {
+    wayland_use_uinput()
+        && hbb_common::config::option2bool(
+            "enable-hi-res-scroll",
+            &hbb_common::config::Config::get_option("enable-hi-res-scroll"),
+        )
 }
 
 #[inline]

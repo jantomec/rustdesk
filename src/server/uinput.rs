@@ -175,6 +175,12 @@ pub mod client {
         fn mouse_scroll_y(&mut self, length: i32) {
             allow_err!(self.send(Data::Mouse(DataMouse::ScrollY(length))));
         }
+        fn mouse_scroll_pixel_x(&mut self, px: i32) {
+            allow_err!(self.send(Data::Mouse(DataMouse::ScrollPixelX(px))));
+        }
+        fn mouse_scroll_pixel_y(&mut self, px: i32) {
+            allow_err!(self.send(Data::Mouse(DataMouse::ScrollPixelY(px))));
+        }
     }
 
     pub async fn set_resolution(minx: i32, maxx: i32, miny: i32, maxy: i32) -> ResultType<()> {
@@ -761,8 +767,28 @@ pub mod service {
                 };
                 allow_err!(mouse.click_button(&btn))
             }
-            DataMouse::ScrollX(_length) => {
-                // TODO: not supported for now
+            DataMouse::ScrollX(length) => {
+                let mut length = *length;
+
+                let scroll = if length < 0 {
+                    mouce::ScrollDirection::Left
+                } else {
+                    mouce::ScrollDirection::Right
+                };
+
+                if length < 0 {
+                    length = -length;
+                }
+
+                for _ in 0..length {
+                    allow_err!(mouse.scroll_wheel(&scroll))
+                }
+            }
+            DataMouse::ScrollPixelX(px) => {
+                allow_err!(mouse.scroll_pixel_h(*px))
+            }
+            DataMouse::ScrollPixelY(px) => {
+                allow_err!(mouse.scroll_pixel_v(*px))
             }
             DataMouse::ScrollY(length) => {
                 let mut length = *length;
@@ -1059,6 +1085,12 @@ mod mouce {
     pub const ABS_Y: c_uint = 0x01;
     pub const REL_WHEEL: c_uint = 0x08;
     pub const REL_HWHEEL: c_uint = 0x06;
+    pub const REL_WHEEL_HI_RES: c_uint = 0x0b;
+    pub const REL_HWHEEL_HI_RES: c_uint = 0x0c;
+    /// Hi-res wheel units per detent (kernel convention) and the pixel travel
+    /// one detent corresponds to (matches libinput's 15 px default).
+    const WHEEL_HI_RES_UNIT: i32 = 120;
+    const WHEEL_PIXELS_PER_DETENT: i32 = 15;
     pub const BTN_LEFT: c_int = 0x110;
     pub const BTN_RIGHT: c_int = 0x111;
     pub const BTN_MIDDLE: c_int = 0x112;
@@ -1146,6 +1178,9 @@ mod mouce {
 
     pub struct UInputMouseManager {
         uinput_file: File,
+        // Hi-res scroll remainders toward the next compat detent event.
+        wheel_accum: std::cell::Cell<i32>,
+        hwheel_accum: std::cell::Cell<i32>,
     }
 
     impl UInputMouseManager {
@@ -1155,6 +1190,8 @@ mod mouce {
                     .write(true)
                     .custom_flags(O_NONBLOCK)
                     .open("/dev/uinput")?,
+                wheel_accum: std::cell::Cell::new(0),
+                hwheel_accum: std::cell::Cell::new(0),
             };
             let fd = manager.uinput_file.as_raw_fd();
             unsafe {
@@ -1204,6 +1241,8 @@ mod mouce {
                 ioctl(fd, UI_SET_RELBIT, REL_Y);
                 ioctl(fd, UI_SET_RELBIT, REL_WHEEL);
                 ioctl(fd, UI_SET_RELBIT, REL_HWHEEL);
+                ioctl(fd, UI_SET_RELBIT, REL_WHEEL_HI_RES);
+                ioctl(fd, UI_SET_RELBIT, REL_HWHEEL_HI_RES);
             }
 
             let mut usetup = UInputSetup {
@@ -1353,6 +1392,51 @@ mod mouce {
             };
             self.emit(EV_REL, code as c_int, scroll_value)?;
             self.syncronize()
+        }
+
+        /// Pixel-precise vertical scroll; negative `px` scrolls up, matching
+        /// `DataMouse::ScrollY`'s orientation (negative length = wheel up).
+        pub fn scroll_pixel_v(&self, px: i32) -> Result<()> {
+            self.scroll_pixel(
+                -px * WHEEL_HI_RES_UNIT / WHEEL_PIXELS_PER_DETENT,
+                REL_WHEEL_HI_RES,
+                REL_WHEEL,
+                &self.wheel_accum,
+            )
+        }
+
+        /// Pixel-precise horizontal scroll; positive `px` scrolls right.
+        pub fn scroll_pixel_h(&self, px: i32) -> Result<()> {
+            self.scroll_pixel(
+                px * WHEEL_HI_RES_UNIT / WHEEL_PIXELS_PER_DETENT,
+                REL_HWHEEL_HI_RES,
+                REL_HWHEEL,
+                &self.hwheel_accum,
+            )
+        }
+
+        /// Emit hi-res units and, per the kernel's hi-res wheel convention, a
+        /// compat detent event whenever ±120 units accumulate. No pacing
+        /// sleep: scroll arrives at gesture rate and each message is one
+        /// event, so the 1 ms `syncronize` delay would only build a backlog.
+        fn scroll_pixel(
+            &self,
+            hi_units: i32,
+            hi_code: c_uint,
+            code: c_uint,
+            accum: &std::cell::Cell<i32>,
+        ) -> Result<()> {
+            if hi_units == 0 {
+                return Ok(());
+            }
+            self.emit(EV_REL, hi_code as c_int, hi_units)?;
+            let total = accum.get() + hi_units;
+            let clicks = total / WHEEL_HI_RES_UNIT;
+            accum.set(total - clicks * WHEEL_HI_RES_UNIT);
+            if clicks != 0 {
+                self.emit(EV_REL, code as c_int, clicks)?;
+            }
+            self.emit(EV_SYN, SYN_REPORT, 0)
         }
     }
 

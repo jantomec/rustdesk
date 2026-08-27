@@ -256,6 +256,24 @@ pub trait MouseControllable {
     /// enigo.mouse_scroll_y(2);
     /// ```
     fn mouse_scroll_y(&mut self, length: i32);
+
+    /// Pixel-precise horizontal scroll (~15 px per wheel detent). Backends
+    /// with a hi-res wheel override this; the default degrades to detents.
+    fn mouse_scroll_pixel_x(&mut self, px: i32) {
+        let ticks = px / 15;
+        if ticks != 0 {
+            self.mouse_scroll_x(ticks);
+        }
+    }
+
+    /// Pixel-precise vertical scroll (~15 px per wheel detent). Backends
+    /// with a hi-res wheel override this; the default degrades to detents.
+    fn mouse_scroll_pixel_y(&mut self, px: i32) {
+        let ticks = px / 15;
+        if ticks != 0 {
+            self.mouse_scroll_y(ticks);
+        }
+    }
 }
 
 /// A key on the keyboard.

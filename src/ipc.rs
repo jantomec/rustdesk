@@ -279,6 +279,9 @@ pub enum DataMouse {
     Click(enigo::MouseButton),
     ScrollX(i32),
     ScrollY(i32),
+    // Pixel-precise scroll (hi-res wheel); ~15 px correspond to one detent.
+    ScrollPixelX(i32),
+    ScrollPixelY(i32),
     Refresh,
 }
 

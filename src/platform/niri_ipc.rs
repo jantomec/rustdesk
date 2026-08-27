@@ -58,7 +58,7 @@ impl NiriOutput {
     }
 }
 
-fn runtime_dir() -> PathBuf {
+pub(crate) fn runtime_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         return PathBuf::from(dir);
     }
@@ -234,6 +234,63 @@ pub fn set_custom_mode(
             } } }
         }
     }))?;
+    Ok(())
+}
+
+/// Turn an output on or off (`niri msg output <name> on/off`). Unknown names
+/// are reported by niri as `OutputWasMissing` inside an `Ok` reply, so they
+/// are surfaced here as an error for the caller to log.
+pub fn set_output_enabled(name: &str, on: bool) -> ResultType<()> {
+    let action = if on { "On" } else { "Off" };
+    log::info!("niri: turning output {name} {action}");
+    let reply = request(json!({ "Output": { "output": name, "action": action } }))?;
+    if reply
+        .get("OutputConfigChanged")
+        .and_then(Value::as_str)
+        .is_some_and(|s| s == "OutputWasMissing")
+    {
+        bail!("niri: output {name} does not exist");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct NiriWorkspace {
+    pub id: u64,
+    pub output: Option<String>,
+    pub has_windows: bool,
+}
+
+pub fn workspaces() -> ResultType<Vec<NiriWorkspace>> {
+    let reply = request(json!("Workspaces"))?;
+    let list = reply
+        .get("Workspaces")
+        .and_then(Value::as_array)
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("unexpected Workspaces reply"))?;
+    Ok(list
+        .iter()
+        .filter_map(|w| {
+            Some(NiriWorkspace {
+                id: w.get("id")?.as_u64()?,
+                output: w
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                has_windows: w
+                    .get("active_window_id")
+                    .is_some_and(|v| !v.is_null()),
+            })
+        })
+        .collect())
+}
+
+/// Move a workspace (addressed by its stable id) to `output`. The raw socket
+/// accepts `{"Id": n}` references; the CLI's index-based `--reference` does not
+/// apply here.
+pub fn move_workspace_to_monitor(id: u64, output: &str) -> ResultType<()> {
+    request(json!({ "Action": { "MoveWorkspaceToMonitor": {
+        "reference": { "Id": id }, "output": output
+    } } }))?;
     Ok(())
 }
 

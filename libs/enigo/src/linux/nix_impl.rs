@@ -217,6 +217,24 @@ impl MouseControllable for Enigo {
             }
         }
     }
+    fn mouse_scroll_pixel_x(&mut self, px: i32) {
+        if self.is_x11 {
+            self.xdo.mouse_scroll_pixel_x(px)
+        } else {
+            if let Some(mouse) = &mut self.custom_mouse {
+                mouse.mouse_scroll_pixel_x(px)
+            }
+        }
+    }
+    fn mouse_scroll_pixel_y(&mut self, px: i32) {
+        if self.is_x11 {
+            self.xdo.mouse_scroll_pixel_y(px)
+        } else {
+            if let Some(mouse) = &mut self.custom_mouse {
+                mouse.mouse_scroll_pixel_y(px)
+            }
+        }
+    }
 }
 
 fn get_led_state(key: Key) -> bool {

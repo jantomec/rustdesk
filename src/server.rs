@@ -622,6 +622,10 @@ pub async fn start_server(is_server: bool, no_server: bool) {
             // cold probe, which is what happened before the warm existed.
             log::warn!("drm: could not spawn the availability warm ({err}); skipping it");
         }
+        // A previous process may have died mid-session-takeover with the
+        // physical outputs still off; its sentinel names what to turn back on.
+        #[cfg(all(target_os = "linux", feature = "drm"))]
+        niri_virtual_display::restore_orphaned_takeover();
         input_service::fix_key_down_timeout_loop();
         #[cfg(target_os = "linux")]
         if input_service::wayland_use_uinput() {

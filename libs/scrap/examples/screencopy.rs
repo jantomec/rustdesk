@@ -14,7 +14,7 @@ fn main() {
         std::process::exit(2);
     }
     let (name, w, h) = (&args[1], args[2].parse().unwrap(), args[3].parse().unwrap());
-    let mut cap = ScreencopyCapturer::new(name, w, h).expect("create capturer");
+    let mut cap = ScreencopyCapturer::new(name, w, h, true).expect("create capturer");
     let mut last = None;
     let t0 = Instant::now();
     for i in 0..10 {
