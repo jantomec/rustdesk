@@ -73,7 +73,10 @@ sctk = { package = "smithay-client-toolkit", version = "0.20.0", default-feature
 libc = "0.2"
 
 [dependencies.hwcodec]
-git = "https://github.com/rustdesk-org/hwcodec"
+# Fork: nvenc one-frame VBV cap so full-screen changes cannot burst multi-MB
+# frames that stall Wi-Fi links and trip the delay-based QoS.
+git = "https://github.com/jantomec/hwcodec"
+rev = "bd8861655b1558c8409850cceb233e978f9e6a83"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
