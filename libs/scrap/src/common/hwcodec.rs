@@ -440,16 +440,22 @@ impl HwRamDecoderImage<'_> {
                         ImageFormat::ABGR => NV12ToABGR,
                         _ => bail!("unsupported format: {:?} -> {:?}", frame.pixfmt, rgb.fmt()),
                     };
-                    call_yuv!(f(
-                        frame.data[0].as_ptr(),
-                        frame.linesize[0],
-                        frame.data[1].as_ptr(),
-                        frame.linesize[1],
-                        rgb.raw.as_mut_ptr(),
-                        bytes_per_row as _,
-                        width,
-                        height,
-                    ));
+                    let ret = unsafe {
+                        par_nv12_to_rgb(
+                            f,
+                            frame.data[0].as_ptr(),
+                            frame.linesize[0],
+                            frame.data[1].as_ptr(),
+                            frame.linesize[1],
+                            rgb.raw.as_mut_ptr(),
+                            bytes_per_row as _,
+                            width,
+                            height,
+                        )
+                    };
+                    if ret != 0 {
+                        bail!("errcode={ret} par_nv12_to_rgb");
+                    }
                 }
             }
             AVPixelFormat::AV_PIX_FMT_YUV420P => {
@@ -458,18 +464,24 @@ impl HwRamDecoderImage<'_> {
                     ImageFormat::ABGR => I420ToABGR,
                     _ => bail!("unsupported format: {:?} -> {:?}", frame.pixfmt, rgb.fmt()),
                 };
-                call_yuv!(f(
-                    frame.data[0].as_ptr(),
-                    frame.linesize[0],
-                    frame.data[1].as_ptr(),
-                    frame.linesize[1],
-                    frame.data[2].as_ptr(),
-                    frame.linesize[2],
-                    rgb.raw.as_mut_ptr(),
-                    bytes_per_row as _,
-                    width,
-                    height,
-                ));
+                let ret = unsafe {
+                    par_i420_to_rgb(
+                        f,
+                        frame.data[0].as_ptr(),
+                        frame.linesize[0],
+                        frame.data[1].as_ptr(),
+                        frame.linesize[1],
+                        frame.data[2].as_ptr(),
+                        frame.linesize[2],
+                        rgb.raw.as_mut_ptr(),
+                        bytes_per_row as _,
+                        width,
+                        height,
+                    )
+                };
+                if ret != 0 {
+                    bail!("errcode={ret} par_i420_to_rgb");
+                }
             }
         }
         Ok(())
