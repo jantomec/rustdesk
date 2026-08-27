@@ -2442,7 +2442,10 @@ impl<T: InvokeUiSession> Remote<T> {
                 if pixelbuffer {
                     handler.on_rgba(display, data);
                 } else {
-                    #[cfg(all(feature = "vram", feature = "flutter"))]
+                    #[cfg(any(
+                        all(feature = "vram", feature = "flutter"),
+                        all(target_os = "macos", feature = "flutter", feature = "hwcodec")
+                    ))]
                     handler.on_texture(display, _texture);
                 }
             },

@@ -70,7 +70,10 @@ gstreamer-video = { version = "0.16", optional = true }
 zbus = { version = "3.15", optional = true }
 
 [dependencies.hwcodec]
-git = "https://github.com/rustdesk-org/hwcodec"
+# Fork: zero-copy VideoToolbox decode output (CVPixelBuffer pass-through) and
+# an nvenc one-frame VBV cap.
+git = "https://github.com/jantomec/hwcodec"
+rev = "a07b4233574a85024bd99eb0532050921d1721c2"
 optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]

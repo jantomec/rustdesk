@@ -668,7 +668,14 @@ impl Decoder {
                 }
                 #[cfg(feature = "hwcodec")]
                 if let Some(decoder) = &mut self.h264_ram {
-                    return Decoder::handle_hwram_video_frame(decoder, h264s, rgb, &mut self.i420);
+                    return Decoder::handle_hwram_video_frame(
+                        decoder,
+                        h264s,
+                        rgb,
+                        &mut self.i420,
+                        _texture,
+                        _pixelbuffer,
+                    );
                 }
                 Err(anyhow!("don't support h264!"))
             }
@@ -682,7 +689,14 @@ impl Decoder {
                 }
                 #[cfg(feature = "hwcodec")]
                 if let Some(decoder) = &mut self.h265_ram {
-                    return Decoder::handle_hwram_video_frame(decoder, h265s, rgb, &mut self.i420);
+                    return Decoder::handle_hwram_video_frame(
+                        decoder,
+                        h265s,
+                        rgb,
+                        &mut self.i420,
+                        _texture,
+                        _pixelbuffer,
+                    );
                 }
                 Err(anyhow!("don't support h265!"))
             }
@@ -769,10 +783,29 @@ impl Decoder {
         frames: &EncodedVideoFrames,
         rgb: &mut ImageRgb,
         i420: &mut Vec<u8>,
+        _texture: &mut ImageTexture,
+        _pixelbuffer: &mut bool,
     ) -> ResultType<bool> {
         let mut ret = false;
         for h264 in frames.frames.iter() {
             for image in decoder.decode(&h264.data)? {
+                // macOS zero-copy: the decoder handed out a retained
+                // CVPixelBufferRef; forward it through the texture slot. Only
+                // the last frame of a message is shown, so release any one it
+                // replaces within this call. Ownership then rests with the
+                // video-thread callback, which releases after the UI fan-out.
+                #[cfg(target_os = "macos")]
+                if image.frame.pixbuf != 0 {
+                    if !*_pixelbuffer && ret {
+                        super::hwcodec::release_pixbuf(_texture.texture as usize);
+                    }
+                    _texture.texture = image.frame.take_pixbuf() as *mut std::ffi::c_void;
+                    _texture.w = image.frame.width as usize;
+                    _texture.h = image.frame.height as usize;
+                    *_pixelbuffer = false;
+                    ret = true;
+                    continue;
+                }
                 // TODO: just process the last frame
                 if image.to_fmt(rgb, i420).is_ok() {
                     ret = true;

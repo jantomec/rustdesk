@@ -355,6 +355,7 @@ impl HwRamDecoder {
             name: info.name.clone(),
             device_type: info.hwdevice.clone(),
             thread_count: codec_thread_num(16) as _,
+            no_transfer: pixelbuffer_output(),
         };
         match Decoder::new(ctx) {
             Ok(decoder) => Ok(HwRamDecoder { decoder, info }),
@@ -366,20 +367,43 @@ impl HwRamDecoder {
     }
     pub fn decode<'a>(&'a mut self, data: &[u8]) -> ResultType<Vec<HwRamDecoderImage<'a>>> {
         match self.decoder.decode(data) {
-            Ok(v) => Ok(v.iter().map(|f| HwRamDecoderImage { frame: f }).collect()),
+            Ok(v) => Ok(v
+                .iter_mut()
+                .map(|f| HwRamDecoderImage { frame: f })
+                .collect()),
             Err(e) => Err(anyhow!(e)),
         }
     }
 }
 
+// macOS zero-copy decode: VideoToolbox frames stay on-GPU as CVPixelBuffers
+// and are handed to the Flutter texture directly. Enabled by the client once
+// it has verified the texture plugin exposes the pixel-buffer entry point.
+static PIXELBUFFER_OUTPUT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_pixelbuffer_output(enable: bool) {
+    PIXELBUFFER_OUTPUT.store(enable, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn pixelbuffer_output() -> bool {
+    cfg!(target_os = "macos") && PIXELBUFFER_OUTPUT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Release one retain on a CVPixelBufferRef taken out of a decoded frame.
+#[cfg(target_os = "macos")]
+pub fn release_pixbuf(pixbuf: usize) {
+    hwcodec::ffmpeg_ram::decode::release_pixbuf(pixbuf);
+}
+
 pub struct HwRamDecoderImage<'a> {
-    frame: &'a DecodeFrame,
+    pub frame: &'a mut DecodeFrame,
 }
 
 impl HwRamDecoderImage<'_> {
     // rgb [in/out] fmt and stride must be set in ImageRgb
     pub fn to_fmt(&self, rgb: &mut ImageRgb, i420: &mut Vec<u8>) -> ResultType<()> {
-        let frame = self.frame;
+        let frame = &*self.frame;
         let width = frame.width;
         let height = frame.height;
         rgb.w = width as _;
@@ -457,6 +481,9 @@ impl HwRamDecoderImage<'_> {
                         bail!("errcode={ret} par_nv12_to_rgb");
                     }
                 }
+            }
+            AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX => {
+                bail!("zero-copy pixel-buffer frame has no CPU planes; use the texture path")
             }
             AVPixelFormat::AV_PIX_FMT_YUV420P => {
                 let f = match rgb.fmt() {

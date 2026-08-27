@@ -258,6 +258,12 @@ pub type FlutterRgbaRendererPluginOnRgba = unsafe extern "C" fn(
     dst_rgba_stride: c_int,
 );
 
+// Zero-copy decode path: the plugin borrows a CVPixelBufferRef for the call
+// and retains what it stores; the caller keeps ownership.
+#[cfg(target_os = "macos")]
+pub type FlutterRgbaRendererPluginOnPixelBuffer =
+    unsafe extern "C" fn(texture_rgba: *mut c_void, pixel_buffer: *mut c_void);
+
 #[cfg(feature = "vram")]
 pub type FlutterGpuTextureRendererPluginCApiSetTexture =
     unsafe extern "C" fn(output: *mut c_void, texture: *mut c_void);
@@ -285,6 +291,8 @@ struct VideoRenderer {
     on_rgba_func: Option<Symbol<'static, FlutterRgbaRendererPluginOnRgba>>,
     #[cfg(feature = "vram")]
     on_texture_func: Option<Symbol<'static, FlutterGpuTextureRendererPluginCApiSetTexture>>,
+    #[cfg(target_os = "macos")]
+    on_pixelbuffer_func: Option<Symbol<'static, FlutterRgbaRendererPluginOnPixelBuffer>>,
 }
 
 impl Default for VideoRenderer {
@@ -330,6 +338,25 @@ impl Default for VideoRenderer {
             }
         };
 
+        // macOS zero-copy decode: only worth enabling when the linked texture
+        // plugin exposes the pixel-buffer entry point AND frames are rendered
+        // through textures; otherwise decoded CVPixelBuffers would have no
+        // consumer and frames must keep going through the RGBA path.
+        #[cfg(target_os = "macos")]
+        let on_pixelbuffer_func = match &*TEXTURE_RGBA_RENDERER_PLUGIN {
+            Ok(lib) => unsafe {
+                lib.symbol::<FlutterRgbaRendererPluginOnPixelBuffer>(
+                    "FlutterRgbaRendererPluginOnPixelBuffer",
+                )
+            }
+            .ok(),
+            Err(_) => None,
+        };
+        #[cfg(all(target_os = "macos", feature = "hwcodec"))]
+        scrap::hwcodec::set_pixelbuffer_output(
+            on_pixelbuffer_func.is_some() && crate::ui_interface::use_texture_render(),
+        );
+
         Self {
             map_display_sessions: Default::default(),
             is_support_multi_ui_session: false,
@@ -337,6 +364,8 @@ impl Default for VideoRenderer {
             on_rgba_func,
             #[cfg(feature = "vram")]
             on_texture_func,
+            #[cfg(target_os = "macos")]
+            on_pixelbuffer_func,
         }
     }
 }
@@ -485,6 +514,33 @@ impl VideoRenderer {
                     rgba.align() as _,
                 )
             };
+        }
+        if info.notify_render_type != Some(RenderType::PixelBuffer) {
+            info.notify_render_type = Some(RenderType::PixelBuffer);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Zero-copy frame: forward a borrowed CVPixelBufferRef to the same
+    /// TextRgba texture the RGBA path uses; the plugin retains what it keeps.
+    #[cfg(target_os = "macos")]
+    pub fn on_pixelbuffer(&self, display: usize, pixbuf: *mut c_void) -> bool {
+        let mut write_lock = self.map_display_sessions.write().unwrap();
+        let opt_info = if !self.is_support_multi_ui_session {
+            write_lock.values_mut().next()
+        } else {
+            write_lock.get_mut(&display)
+        };
+        let Some(info) = opt_info else {
+            return false;
+        };
+        if info.texture_rgba_ptr == usize::default() {
+            return false;
+        }
+        if let Some(func) = &self.on_pixelbuffer_func {
+            unsafe { func(info.texture_rgba_ptr as _, pixbuf) };
         }
         if info.notify_render_type != Some(RenderType::PixelBuffer) {
             info.notify_render_type = Some(RenderType::PixelBuffer);
@@ -866,6 +922,24 @@ impl InvokeUiSession for FlutterHandler {
                 }
             }
         }
+    }
+
+    /// macOS zero-copy: `texture` is a retained CVPixelBufferRef from the
+    /// decoder. Sessions borrow it during the fan-out; the single retain is
+    /// released here in every path.
+    #[inline]
+    #[cfg(all(target_os = "macos", not(feature = "vram"), feature = "hwcodec"))]
+    fn on_texture(&self, display: usize, texture: *mut c_void) {
+        if self.use_texture_render.load(Ordering::Relaxed) {
+            for (_, session) in self.session_handlers.read().unwrap().iter() {
+                if session.renderer.on_pixelbuffer(display, texture) {
+                    if let Some(stream) = &session.event_stream {
+                        stream.add(EventToUI::Texture(display, false));
+                    }
+                }
+            }
+        }
+        scrap::hwcodec::release_pixbuf(texture as usize);
     }
 
     fn set_peer_info(&self, pi: &PeerInfo) {
