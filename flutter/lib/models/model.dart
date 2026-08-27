@@ -4128,7 +4128,11 @@ class Display {
   int originalWidth = kInvalidResolutionValue;
   int originalHeight = kInvalidResolutionValue;
   double _scale = 1.0;
-  double get scale => _scale > 1.0 ? _scale : 1.0;
+  // The niri virtual display's contract is physical pixels end-to-end (rect,
+  // auto-fit target, stream), so its compositor scale must not leak into the
+  // client's logical-geometry conversions (rect division, paint scale).
+  double get scale =>
+      (_scale > 1.0 && !isVirtualDisplayResolution) ? _scale : 1.0;
 
   Display() {
     width = (isDesktop || isWebDesktop)
