@@ -29,6 +29,23 @@ const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_NV12;
 pub const DEFAULT_FPS: i32 = 30;
 const DEFAULT_GOP: i32 = i32::MAX;
 const DEFAULT_HW_QUALITY: Quality = Quality_Default;
+
+// The encoder's fps sizes its rate-control budget (the nvenc VBV window is
+// bit_rate/fps): with the upstream-hardcoded 30 a 60 fps session both
+// over-spends bandwidth 2x and doubles the wake-burst frame size. The
+// connection feeds the session's target here; encoders pick it up when
+// (re)created.
+static ENCODE_FPS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(DEFAULT_FPS);
+
+pub fn set_encode_fps(fps: i32) {
+    if (1..=240).contains(&fps) {
+        ENCODE_FPS.store(fps, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn encode_fps() -> i32 {
+    ENCODE_FPS.load(std::sync::atomic::Ordering::Relaxed)
+}
 pub const ERR_HEVC_POC: i32 = HwcodecErrno::HWCODEC_ERR_HEVC_COULD_NOT_FIND_POC as i32;
 
 crate::generate_call_macro!(call_yuv, false);
@@ -86,7 +103,7 @@ impl EncoderApi for HwRamEncoder {
                     pixfmt: DEFAULT_PIXFMT,
                     align: HW_STRIDE_ALIGN as _,
                     kbs: bitrate as i32,
-                    fps: DEFAULT_FPS,
+                    fps: encode_fps(),
                     gop,
                     quality,
                     rc,

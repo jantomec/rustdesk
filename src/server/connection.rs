@@ -4647,6 +4647,8 @@ impl Connection {
                 .lock()
                 .unwrap()
                 .user_custom_fps(self.inner.id(), o.custom_fps as _);
+            #[cfg(feature = "hwcodec")]
+            scrap::hwcodec::set_encode_fps(o.custom_fps as _);
         }
         if let Some(q) = o.supported_decoding.clone().take() {
             scrap::codec::Encoder::update(scrap::codec::EncodingUpdate::Update(self.inner.id(), q));
